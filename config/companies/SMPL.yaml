@@ -1,0 +1,21 @@
+# One file per company. Add more with `reviewtone add-company`.
+# amazon_store_names: exact Amazon `store` names (matched case-insensitively).
+# mcauley_categories: Amazon Reviews 2023 categories searched by `reviewtone backfill`.
+ticker: SMPL
+name: The Simply Good Foods Company
+fiscal_year_end: 08-31
+brands:
+- name: Quest
+  amazon_store_names:
+  - Quest Nutrition
+  - Quest
+- name: Atkins
+  amazon_store_names:
+  - Atkins
+- name: OWYN
+  amazon_store_names:
+  - OWYN Only What You Need
+  - OWYN
+mcauley_categories:
+- Grocery_and_Gourmet_Food
+- Health_and_Household

@@ -1,0 +1,16 @@
+# One file per company. Add more with `reviewtone add-company`.
+# amazon_store_names: exact Amazon `store` names (matched case-insensitively).
+# mcauley_categories: Amazon Reviews 2023 categories searched by `reviewtone backfill`.
+ticker: ELF
+name: e.l.f. Beauty, Inc.
+fiscal_year_end: 03-31
+brands:
+- name: e.l.f.
+  amazon_store_names:
+  - e.l.f.
+  - e.l.f. Cosmetics
+- name: Naturium
+  amazon_store_names:
+  - Naturium
+mcauley_categories:
+- Beauty_and_Personal_Care

@@ -1,0 +1,24 @@
+# One file per company. Add more with `reviewtone add-company`.
+# amazon_store_names: exact Amazon `store` names (matched case-insensitively).
+# mcauley_categories: Amazon Reviews 2023 categories searched by `reviewtone backfill`.
+ticker: CRSR
+name: Corsair Gaming, Inc.
+fiscal_year_end: 12-31
+brands:
+- name: Corsair
+  amazon_store_names:
+  - Corsair
+- name: Elgato
+  amazon_store_names:
+  - Elgato
+- name: SCUF
+  amazon_store_names:
+  - SCUF
+  - SCUF GAMING
+  - Scuf Gaming
+  - Scuf Gaming International
+  - Scuf Gaming Internaional
+mcauley_categories:
+- Electronics
+- Video_Games
+- Office_Products

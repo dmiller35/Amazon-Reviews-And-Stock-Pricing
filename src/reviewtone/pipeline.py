@@ -109,22 +109,37 @@ class Run:
                 except SourceUnavailable as e:
                     errors.append(str(e))
         elif source == "apify":
-            from .sources.apify import ApifyReviews
+            from .sources.apify import ApifyReviews, ProductUnavailable
             client = ApifyReviews(log=self.log)
             stored = rv.load(self.dir / "reviews.csv")
-            for p in self.tracked_products(products, top_products).itertuples():
+            want = top_products or self.study.raw.get("apify", {}).get("top_products", 20)
+            live = 0
+            # Walk down the ranking: products Amazon no longer sells are marked
+            # dead and replaced by the next most-reviewed, so every tracked
+            # product has both historical and current reviews.
+            for p in self.tracked_products(products, top=len(products)).itertuples():
+                if live >= want:
+                    break
+                mine = stored[(stored["asin"] == p.asin) | (stored["parent_asin"] == p.asin)]
+                newest = mine["review_date"].max() if len(mine) else None
+                since = (pd.Timestamp(newest) - pd.Timedelta(days=7)).strftime("%Y-%m-%d") if newest else None
                 try:
                     res = client.fetch(p.asin, ticker=self.company.ticker, brand=p.brand,
-                                       max_reviews=max_reviews_per_product)
+                                       max_reviews=max_reviews_per_product, since=since)
+                except ProductUnavailable as e:
+                    products.loc[products["asin"] == p.asin, ["live", "live_checked_at"]] = [False, utcnow()]
+                    errors.append(str(e))
+                    continue
                 except SourceUnavailable as e:
                     errors.append(str(e))
                     if "APIFY_TOKEN" in str(e) or "unreachable" in str(e):
                         break
                     continue
+                live += 1
+                products.loc[products["asin"] == p.asin, ["live", "live_checked_at"]] = [True, utcnow()]
                 frames.append(res.reviews.assign(parent_asin=res.reviews["parent_asin"].fillna(p.parent_asin)))
-                mine = stored[(stored["asin"] == p.asin) | (stored["parent_asin"] == p.asin)]
-                self._record_coverage(p.asin, res.reviews, res.hit_cap, res.complete_from,
-                                      mine["review_date"].max() if len(mine) else None)
+                self._record_coverage(p.asin, res.reviews, res.hit_cap, res.complete_from, newest)
+            products.to_csv(self.dir / "products.csv", index=False)
         elif source == "csv":
             frames.append(pd.read_csv(csv_path).assign(ticker=self.company.ticker))
         else:
@@ -148,6 +163,8 @@ class Run:
             path = self.dir / "products.csv"
             products = pd.read_csv(path, dtype=str) if path.exists() else pd.DataFrame(columns=catalog.PRODUCT_COLUMNS)
         top = top or self.study.raw.get("apify", {}).get("top_products", 20)
+        if "live" in products:
+            products = products[products["live"].astype(str) != "False"]  # delisted products are skipped
         return (products.assign(_seed=products["source"].astype(str).str.startswith("manual"),
                                 _n=pd.to_numeric(products["rating_number"], errors="coerce").fillna(0))
                 .sort_values(["_seed", "_n"], ascending=False).head(top).drop(columns=["_seed", "_n"]))

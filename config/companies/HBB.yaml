@@ -1,0 +1,16 @@
+# One file per company. Add more with `reviewtone add-company`.
+# amazon_store_names: exact Amazon `store` names (matched case-insensitively).
+# mcauley_categories: Amazon Reviews 2023 categories searched by `reviewtone backfill`.
+ticker: HBB
+name: Hamilton Beach Brands Holding Company
+fiscal_year_end: 12-31
+brands:
+- name: Hamilton Beach
+  amazon_store_names:
+  - Hamilton Beach
+  - Hamilton Beach Professional
+- name: Proctor Silex
+  amazon_store_names:
+  - Proctor Silex
+mcauley_categories:
+- Home_and_Kitchen

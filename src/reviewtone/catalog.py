@@ -10,7 +10,7 @@ from .config import Company
 
 PRODUCT_COLUMNS = [
     "ticker", "brand", "asin", "parent_asin", "title", "store", "category", "rating_number",
-    "url", "official_store", "source", "discovered_at",
+    "url", "official_store", "source", "discovered_at", "live", "live_checked_at",
 ]
 
 

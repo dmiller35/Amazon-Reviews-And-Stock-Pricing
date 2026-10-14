@@ -1,22 +1,31 @@
 # Which Apify actor collects live Amazon reviews, and how to call it.
 #
-# Pick a PAY-PER-RESULT actor (no monthly rental). Check its Input tab on
-# apify.com and make `input` below match it exactly. Placeholders:
-#   {asin}  product ASIN        {max}  max reviews per request
-#   {star}  star filter value (only when by_star is true; one run per value)
+# Pick a PAY-PER-RESULT actor (no monthly rental) and make `input` match its
+# Input tab exactly. Placeholders, filled per request:
+#   {asin}  product ASIN       {max}  max reviews per request
+#   {star}  one star rating, when split_by_star is true (one run per value)
+#   {since} newest stored review date minus a week; a key whose value is just
+#           "{since}" is left out when nothing is stored yet
 # The APIFY_REVIEWS_ACTOR environment variable overrides `actor`. Built-in
 # profiles also exist for axesso_data~amazon-reviews-scraper and
 # junglee~amazon-reviews-scraper: set `actor` to one of them and delete `input`.
 
-# stanvanrooy6 "Amazon Reviews Scraper (US)": pay per review (about $2 per 1,000;
-# less on higher Apify plans), no Amazon login, US only, up to ~1,000 reviews per
-# product in "expanded" mode. Field names come from its public examples; confirm
-# them on the Input tab before the first run.
+# stanvanrooy6 "Amazon Reviews Scraper (US)": $0.002 per review delivered, no
+# monthly fee, no Amazon login. It reads Amazon US reviews through Woot (owned
+# by Amazon). Verified live on 2026-10-14. "recent" mode returns up to 100 of the
+# newest reviews per star rating, so each star is requested separately (this
+# also fits Apify's free plan, which caps a run at 100 results).
 actor: stanvanrooy6~amazon-review-scraper-us
-by_star: false
-# A run that returns this many reviews may have been cut off (history truncated).
+split_by_star: true
+star_values: [1, 2, 3, 4, 5]
+by_star: true            # judge truncation per star list
+max_per_request: 100     # the actor's per-star limit in "recent" mode
 cap: "{max}"
 input:
   products: ["{asin}"]
+  mode: recent
+  ratings: ["{star}"]
   maxReviewsPerProduct: "{max}"
-  mode: expanded
+  dateFrom: "{since}"
+  includePhotoVideoReviews: false
+  failOnPartial: false

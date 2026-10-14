@@ -77,8 +77,8 @@ Then `source .venv/bin/activate` and:
 ```bash
 reviewtone backfill --all          # 1. history 2018-Sep 2023: products.csv + reviews.csv for every company
                                    #    (streams ~36 GB once; 30-90 min depending on bandwidth; free)
-reviewtone fetch --ticker LOGI --source apify --max-reviews 300    # 2. recent reviews (Apify, paid:
-                                   #    top 20 products x 300 reviews = 6,000 reviews, about $12)
+reviewtone fetch --ticker LOGI --source apify                      # 2. recent reviews (Apify, paid: up
+                                   #    to 20 products x 5 stars x 100 = 10,000 reviews, at most $20)
 reviewtone score --ticker LOGI --sample 200                        # 3. try Claude on 200 reviews, check cost
 reviewtone run --ticker LOGI --scorer naive_bayes                  # 4. score the rest cheaply, then
                                    #    quarters, charts, SEC join, held-out eval, prediction, report
@@ -106,25 +106,37 @@ date on are marked as a coverage gap.
 
 Live reviews from Apify are what the current prediction runs on. The actor and its
 input format are set in `config/apify.yaml`, so you can switch actors without code
-changes. Pick a pay-per-result actor, not a monthly rental. The default is
-[stanvanrooy6's Amazon Reviews Scraper (US)](https://apify.com/stanvanrooy6/amazon-review-scraper-us):
-about $2 per 1,000 reviews, no Amazon login, up to ~1,000 reviews per product.
-Check its Input tab once and fix the field names in `config/apify.yaml` if they
-differ. Only each company's 20 most-reviewed products are scraped
-(`apify.top_products` in `config/study.yaml`, or `--top`). `--max-reviews` is per
-product: about 300 on the first fetch, and the weekly update uses 30. Rough cost:
-companies × products × reviews × $0.002, so 7 × 20 × 30 is about $8 a week. Built-in profiles for
-Axesso (star-filtered) and Junglee remain: set `actor:` to
-`axesso_data~amazon-reviews-scraper` or `junglee~amazon-reviews-scraper` and
-remove `input:`. The catch is depth: popular products still only reach back
-weeks or months, and
+changes; pick a pay-per-result actor, not a monthly rental. The default,
+[stanvanrooy6's Amazon Reviews Scraper (US)](https://apify.com/stanvanrooy6/amazon-review-scraper-us),
+was tested live on 2026-10-14: $0.002 per review delivered, no monthly fee, no
+Amazon login. It reads Amazon US reviews through Woot (owned by Amazon), so each
+review keeps its origin in the `source` column.
+
+How it is used:
+- **Each star rating is a separate run.** "Newest" mode returns up to 100 reviews
+  per star, so a product yields up to 500. This also fits Apify's free plan, which
+  caps a run at 100 results. `--max-reviews` is per star (max 100).
+- **Only new reviews are paid for.** Each run asks only for reviews from a week
+  before the newest stored one (`dateFrom`).
+- **Only each company's 20 most-reviewed products are followed live**
+  (`apify.top_products`). Products Amazon no longer sells are detected, marked
+  `live=False` in `products.csv`, and replaced by the next most-reviewed. Every
+  tracked product therefore has both historical and current reviews.
+
+Rough cost: the first fetch is at most 16 companies × 20 products × 500 reviews ×
+$0.002, about $320 if every list were full (most aren't). After that, weekly
+updates pay only for new reviews: a few dollars a week. Built-in profiles for
+Axesso and Junglee remain: set `actor:` to `axesso_data~amazon-reviews-scraper`
+or `junglee~amazon-reviews-scraper` and remove `input:`.
+
+The catch is depth: popular products still only reach back weeks or months, and
 AbnormalTone needs the four quarters before the signal quarter as its baseline.
 When a fetch hits the per-product cap, any window between the reviews already
 stored and the oldest one fetched is recorded as a gap in `coverage.csv`. Quarters
 that overlap a gap, or whose baseline does, are marked `partial_coverage` /
 `partial_baseline` and never used for calls. Fetches that overlap stored reviews,
 like a normal weekly update, leave no gap. So history grows forward on its own,
-and a large `--max-reviews` on the first fetch reaches as far back as the actor can.
+and the first fetch already reaches as far back as the actor allows.
 For a multi-year backtest without waiting, use the
 McAuley Lab **Amazon Reviews 2023** dataset (reviews through Sep 2023; the paper used
 the same lab's earlier release):
@@ -155,11 +167,33 @@ Repeat `--brand` for multi-brand companies. Optional `--asins` seeds
 `research/<TICKER>/seed_asins.csv`. You can also just copy an existing file in
 `config/companies/`.
 
-The starting universe is the brands shown in the video: Logitech (LOGI),
-Shark/Ninja (SN), OXO/Hydro Flask (HELE), Rubbermaid/Sharpie (NWL), Tide (PG),
-Colgate (CL) and YETI. With fewer than 8 firms the portfolio uses halves instead of
-quartiles, and alphas on a handful of quarters are noise. Adding companies helps
-more than anything else.
+### The universe (16 companies)
+
+**From the video (7):** Logitech (LOGI), SharkNinja (SN), Helen of Troy (OXO,
+Hydro Flask; HELE), Newell (Rubbermaid, Sharpie; NWL), Procter & Gamble (Tide;
+PG), Colgate-Palmolive (CL) and YETI.
+
+**Added after research (9).** Each one's latest 10-K names Amazon as a major
+customer, it sells under a few recognisable brands with their own Amazon
+storefronts, and it has heavy review volume in the historical dataset:
+
+| Ticker | Company | Amazon's share of sales (10-K) | Brands tracked |
+|---|---|---|---|
+| CRSR | Corsair Gaming | 27.4% (2025) | Corsair, Elgato, SCUF |
+| HBB | Hamilton Beach Brands | 19% (2025) | Hamilton Beach, Proctor Silex |
+| SMPL | Simply Good Foods | 18% (FY2025) | Quest, Atkins, OWYN |
+| PBH | Prestige Consumer Healthcare | 15% (FY2026) | Summer's Eve, DenTek, Debrox, Monistat, Compound W, Dramamine, Clear Eyes, Fleet, Luden's, Chloraseptic |
+| TBCH | Turtle Beach | 14–28% (2025; one of three largest customers) | Turtle Beach, PDP |
+| ELF | e.l.f. Beauty | 11% (FY2026) | e.l.f., Naturium |
+| MAT | Mattel | about 10% ($0.52B of 2025 sales) | Barbie, Fisher-Price, Hot Wheels, Mattel, Mega Bloks, UNO |
+| ACCO | ACCO Brands | 10% (2025) | AT-A-GLANCE, Mead, Five Star, Swingline, Kensington, GBC, PowerA |
+| BRBR | BellRing Brands | Walmart, Costco and Amazon together: 74% | Premier Protein, Dymatize |
+
+Considered and left out: Hasbro, Funko, GoPro, Sonos and Garmin (Amazon not
+disclosed as a major customer), Lifetime Brands (licensed brands like KitchenAid
+make storefronts ambiguous), JAKKS Pacific (mostly licensed character toys), and
+Kimberly-Clark, Church & Dwight and Clorox (Amazon too small a share to matter).
+With 16 firms the portfolio uses quartiles, as in the paper.
 
 ## Weekly updates
 

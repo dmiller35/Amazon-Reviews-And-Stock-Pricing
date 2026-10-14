@@ -13,4 +13,4 @@ cd "$(dirname "$0")/.."
 [ -x .venv/bin/reviewtone ] && PATH="$PWD/.venv/bin:$PATH"   # created by scripts/setup.sh
 # reviewtone reads .env itself.
 echo "== reviewtone weekly update $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-reviewtone update --max-reviews "${MAX_REVIEWS:-30}"
+reviewtone update --max-reviews "${MAX_REVIEWS:-100}"

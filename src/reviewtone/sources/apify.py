@@ -33,12 +33,16 @@ FIELD_CANDIDATES = {
     "title": ["reviewTitle", "title", "headline"],
     "text": ["reviewDescription", "text", "reviewText", "body", "content", "review", "reviewBody"],
     "review_date": ["date", "reviewDate", "reviewedAt", "review_date", "published_date", "publishedDate"],
-    "verified": ["isVerified", "verified", "verifiedPurchase", "isVerifiedPurchase"],
+    "verified": ["isVerified", "verified", "verifiedPurchase", "isVerifiedPurchase", "verified_purchase"],
     "variant": ["variant", "variantAttributes", "productVariant", "variation"],
     "source_url": ["reviewUrl", "url", "review_url", "sourceUrl", "source_url"],
-    "origin": ["reviewOrigin", "review_origin", "origin"],
-    "country": ["reviewedIn", "country", "countryCode"],
+    "origin": ["reviewOrigin", "review_origin", "origin", "source"],
+    "country": ["reviewedIn", "country", "countryCode", "review_origin_country"],
 }
+
+# Fields actors return that are understood but not stored.
+IGNORED_FIELDS = {"amazon_review_id", "id_type", "marketplace", "published_date_raw", "date_status", "author",
+                  "helpful_votes", "images", "videos", "product_url", "scraped_at", "schema_version", "vine_review"}
 
 _RATING_RE = re.compile(r"(\d(?:\.\d)?)")
 _DATE_RE = re.compile(r"on\s+(.+)$")
@@ -82,7 +86,7 @@ def parse_rating(value: Any) -> float | None:
 def normalize_items(items: list[dict[str, Any]], *, ticker: str, brand: str, fetched_at: str) -> tuple[pd.DataFrame, list[str]]:
     """Map raw actor items to review rows. Returns (rows, unmapped field names)."""
     rows, seen_keys = [], set()
-    known = {k for keys in FIELD_CANDIDATES.values() for k in keys}
+    known = {k for keys in FIELD_CANDIDATES.values() for k in keys} | IGNORED_FIELDS
     for it in items:
         seen_keys.update(it.keys())
         country = _first(it, FIELD_CANDIDATES["country"])
@@ -121,13 +125,14 @@ CONFIG = Path(__file__).resolve().parents[3] / "config" / "apify.yaml"
 class Profile:
     """How to drive one Apify actor.
 
-    payloads(asin, max) -> one input per actor run.
+    payloads(asin, max, since) -> one input per actor run. since: only reviews on
+    or after this date (None = no limit); actors without a date filter ignore it.
     cap(max): reviews per star list (by_star) or per run at which history is
     truncated. With by_star, each star rating is requested separately: Amazon
     shows at most ~100 reviews per filter view, so this reaches about five
     times deeper and the low-star reviews the signal needs can't be crowded out.
     """
-    payloads: Callable[[str, int], list[dict[str, Any]]]
+    payloads: Callable[[str, int, str | None], list[dict[str, Any]]]
     cap: Callable[[int], int]
     by_star: bool
 
@@ -136,13 +141,13 @@ def _pages(m: int) -> int:
     return max(1, min(10, -(-m // 10)))
 
 
-def _axesso(asin: str, max_reviews: int) -> list[dict[str, Any]]:
+def _axesso(asin: str, max_reviews: int, since: str | None = None) -> list[dict[str, Any]]:
     return [{"input": [{"asin": asin, "domainCode": "com", "sortBy": "recent", "maxPages": _pages(max_reviews),
                         "filterByStar": star, "reviewerType": "all_reviews", "formatType": "current_format",
                         "mediaType": "all_contents"} for star in STARS.values()]}]
 
 
-def _junglee(asin: str, max_reviews: int) -> list[dict[str, Any]]:
+def _junglee(asin: str, max_reviews: int, since: str | None = None) -> list[dict[str, Any]]:
     return [{"productUrls": [{"url": f"https://www.amazon.com/dp/{asin}"}], "maxReviews": max_reviews,
              "sort": "recent", "filterByRatings": ["allStars"], "scrapeProductDetails": False, "proxyCountry": "US"}]
 
@@ -153,32 +158,41 @@ BUILTIN = {
 }
 
 
+_DROP = object()
+
+
 def fill(template: Any, values: dict[str, Any]) -> Any:
-    """Substitute {asin}/{max}/{star}; a value that is only a placeholder keeps its type."""
+    """Substitute {asin}/{max}/{star}/{since}; a value that is only a placeholder
+    keeps its type, and a key whose placeholder value is None is dropped."""
     if isinstance(template, dict):
-        return {k: fill(v, values) for k, v in template.items()}
+        out = {k: fill(v, values) for k, v in template.items()}
+        return {k: v for k, v in out.items() if v is not _DROP}
     if isinstance(template, list):
         return [fill(v, values) for v in template]
     if isinstance(template, str):
         for key, val in values.items():
             if template == f"{{{key}}}":
-                return val
+                return _DROP if val is None else val
         for key, val in values.items():
-            template = template.replace(f"{{{key}}}", str(val))
+            template = template.replace(f"{{{key}}}", "" if val is None else str(val))
     return template
 
 
 def template_profile(cfg: dict[str, Any]) -> Profile:
-    tmpl, by_star = cfg["input"], bool(cfg.get("by_star"))
-    stars = cfg.get("star_values", list(STARS.values()))
+    tmpl = cfg["input"]
+    split = bool(cfg.get("split_by_star", cfg.get("by_star")))
+    by_star = bool(cfg.get("by_star", split))
+    stars = cfg.get("star_values", [1, 2, 3, 4, 5])
+    limit = int(cfg.get("max_per_request", 10**9))
 
-    def payloads(asin: str, m: int) -> list[dict[str, Any]]:
-        if by_star:
-            return [fill(tmpl, {"asin": asin, "max": m, "star": s}) for s in stars]
-        return [fill(tmpl, {"asin": asin, "max": m})]
+    def payloads(asin: str, m: int, since: str | None = None) -> list[dict[str, Any]]:
+        values = {"asin": asin, "max": min(m, limit), "since": since}
+        if split:
+            return [fill(tmpl, {**values, "star": s}) for s in stars]
+        return [fill(tmpl, values)]
 
     cap = cfg.get("cap", "{max}")
-    return Profile(payloads, lambda m: int(fill(cap, {"max": m})), by_star)
+    return Profile(payloads, lambda m: int(fill(cap, {"max": min(m, limit)})), by_star)
 
 
 def resolve_profile(actor: str | None = None, config: Path = CONFIG) -> tuple[str, Profile]:
@@ -191,6 +205,10 @@ def resolve_profile(actor: str | None = None, config: Path = CONFIG) -> tuple[st
     if name in BUILTIN:
         return name, BUILTIN[name]
     raise ValueError(f"No input format for Apify actor {name!r}: add its `input` template to {config}.")
+
+
+class ProductUnavailable(SourceUnavailable):
+    """The actor could not read this product (delisted, merged or invalid ASIN)."""
 
 
 @dataclass
@@ -218,14 +236,14 @@ class ApifyReviews:
         self.actor, self.profile = resolve_profile(actor, config)
         self.log = log or AccessLog(None)
 
-    def fetch(self, asin: str, *, ticker: str, brand: str, max_reviews: int = 100,
+    def fetch(self, asin: str, *, ticker: str, brand: str, max_reviews: int = 100, since: str | None = None,
               timeout_s: int = 900) -> FetchResult:
         """Newest reviews of one product. max_reviews applies per star filter for star-filtered actors."""
         if not self.token:
             raise SourceUnavailable("APIFY_TOKEN is not set; cannot run the Apify review scraper.")
         url = f"{API}/acts/{self.actor}/run-sync-get-dataset-items"
         items: list[dict[str, Any]] = []
-        for payload in self.profile.payloads(asin, max_reviews):
+        for payload in self.profile.payloads(asin, max_reviews, since):
             try:
                 resp = requests.post(url, params={"token": self.token, "timeout": timeout_s}, json=payload,
                                      timeout=timeout_s + 60)
@@ -234,6 +252,8 @@ class ApifyReviews:
                 raise SourceUnavailable(f"Apify unreachable: {e}") from e
             self.log.record(source="apify", actor=self.actor, asin=asin, status=resp.status_code,
                             max_reviews=max_reviews)
+            if resp.status_code == 400 and "run-failed" in resp.text:
+                raise ProductUnavailable(f"{asin}: the actor could not read this product (delisted or invalid?)")
             if resp.status_code not in (200, 201):
                 raise SourceUnavailable(f"Apify actor {self.actor} returned HTTP {resp.status_code}: {resp.text[:300]}")
             items.extend(resp.json())

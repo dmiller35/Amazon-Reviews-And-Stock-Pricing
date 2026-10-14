@@ -1,0 +1,16 @@
+# One file per company. Add more with `reviewtone add-company`.
+# amazon_store_names: exact Amazon `store` names (matched case-insensitively).
+# mcauley_categories: Amazon Reviews 2023 categories searched by `reviewtone backfill`.
+ticker: TBCH
+name: Turtle Beach Corporation
+fiscal_year_end: 12-31
+brands:
+- name: Turtle Beach
+  amazon_store_names:
+  - Turtle Beach
+- name: PDP
+  amazon_store_names:
+  - PDP
+mcauley_categories:
+- Video_Games
+- Electronics

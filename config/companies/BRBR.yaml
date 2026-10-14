@@ -1,0 +1,16 @@
+# One file per company. Add more with `reviewtone add-company`.
+# amazon_store_names: exact Amazon `store` names (matched case-insensitively).
+# mcauley_categories: Amazon Reviews 2023 categories searched by `reviewtone backfill`.
+ticker: BRBR
+name: BellRing Brands, Inc.
+fiscal_year_end: 09-30
+brands:
+- name: Premier Protein
+  amazon_store_names:
+  - Premier Protein
+- name: Dymatize
+  amazon_store_names:
+  - Dymatize
+mcauley_categories:
+- Grocery_and_Gourmet_Food
+- Health_and_Household

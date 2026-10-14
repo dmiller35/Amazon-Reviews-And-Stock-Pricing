@@ -102,8 +102,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("portfolio", help="universe long/short portfolio and its Carhart alpha")
 
     p = sub.add_parser("update", help="weekly job: fetch new Apify reviews, rescore, re-evaluate, snapshot")
-    p.add_argument("--max-reviews", type=int, default=30,
-                   help="newest reviews per product (per star for star-filtered actors); older ones are stored")
+    p.add_argument("--max-reviews", type=int, default=100,
+                   help="newest reviews per product (per star for star-filtered actors); only reviews newer "
+                        "than those stored are requested, so you pay for new ones only")
 
     args = ap.parse_args(argv)
     load_dotenv(Path.cwd() / ".env")

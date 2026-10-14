@@ -259,17 +259,37 @@ def test_configured_actor_template(tmp_path, monkeypatch):
 
     monkeypatch.delenv("APIFY_REVIEWS_ACTOR", raising=False)
     name, prof = resolve_profile(config=CONFIG)  # the shipped config parses
-    assert name == "stanvanrooy6~amazon-review-scraper-us" and not prof.by_star
-    assert prof.payloads("B0TEST", 300) == [{"products": ["B0TEST"], "maxReviewsPerProduct": 300, "mode": "expanded"}]
-    assert prof.cap(300) == 300
+    assert name == "stanvanrooy6~amazon-review-scraper-us" and prof.by_star
+    runs = prof.payloads("B0TEST", 300, "2026-09-01")
+    assert len(runs) == 5 and [r["ratings"] for r in runs] == [[1], [2], [3], [4], [5]]
+    assert runs[0] == {"products": ["B0TEST"], "mode": "recent", "ratings": [1], "maxReviewsPerProduct": 100,
+                       "dateFrom": "2026-09-01", "includePhotoVideoReviews": False, "failOnPartial": False}
+    assert "dateFrom" not in prof.payloads("B0TEST", 30, None)[0]   # nothing stored yet: no date filter
+    assert prof.cap(300) == 100 and prof.cap(30) == 30
 
     cfg = tmp_path / "apify.yaml"
-    cfg.write_text("actor: someone/cheap-reviews\nby_star: true\nstar_values: [1, 5]\ncap: 100\n"
-                   "input: {asin: '{asin}', stars: ['{star}'], limit: '{max}', note: 'asin {asin}'}\n")
+    cfg.write_text("actor: someone/cheap-reviews\nsplit_by_star: false\ncap: 100\n"
+                   "input: {asin: '{asin}', limit: '{max}', note: 'asin {asin}'}\n")
     name, prof = resolve_profile(config=cfg)
-    assert name == "someone~cheap-reviews"
-    assert prof.payloads("A1", 50) == [{"asin": "A1", "stars": [1], "limit": 50, "note": "asin A1"},
-                                       {"asin": "A1", "stars": [5], "limit": 50, "note": "asin A1"}]
+    assert name == "someone~cheap-reviews" and not prof.by_star
+    assert prof.payloads("A1", 50) == [{"asin": "A1", "limit": 50, "note": "asin A1"}]
     assert resolve_profile("junglee/amazon-reviews-scraper", cfg)[0] == "junglee~amazon-reviews-scraper"
     with pytest.raises(ValueError):
         resolve_profile("unknown/actor", cfg)
+
+
+def test_real_actor_output_maps():
+    item = {"review_id": "amz-us-ca3f", "id_type": "content_fingerprint", "amazon_review_id": None,
+            "asin": "B0BN7M8CH4", "marketplace": "amazon.com", "rating": 1,
+            "title": "attachments are poorly designed", "body": "detachable wands are impossible to remove",
+            "published_date": "2026-10-12", "published_date_raw": "Reviewed in the United States on October 12, 2026",
+            "date_status": "parsed", "review_origin_country": "the United States", "verified_purchase": True,
+            "vine_review": False, "helpful_votes": 0, "author": None, "source": "woot_amazon_us_reviews",
+            "source_url": "https://www.woot.com/review/Reviews/B0BN7M8CH4", "product_url": "x", "scraped_at": "x",
+            "schema_version": 1, "images": [], "videos": []}
+    df, unmapped = normalize_items([item], ticker="SN", brand="Ninja", fetched_at="now")
+    r = df.iloc[0]
+    assert unmapped == []
+    assert (r.review_id, r.rating, r.text, r.review_date, r.verified) == (
+        "amz-us-ca3f", 1.0, "detachable wands are impossible to remove", "2026-10-12", True)
+    assert r.source == "apify:woot_amazon_us_reviews"

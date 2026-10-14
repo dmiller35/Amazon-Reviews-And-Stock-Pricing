@@ -1,0 +1,32 @@
+# One file per company. Add more with `reviewtone add-company`.
+# amazon_store_names: exact Amazon `store` names (matched case-insensitively).
+# mcauley_categories: Amazon Reviews 2023 categories searched by `reviewtone backfill`.
+ticker: ACCO
+name: ACCO Brands Corporation
+fiscal_year_end: 12-31
+brands:
+- name: AT-A-GLANCE
+  amazon_store_names:
+  - AT-A-GLANCE
+- name: Mead
+  amazon_store_names:
+  - Mead
+- name: Five Star
+  amazon_store_names:
+  - Five Star
+- name: Swingline
+  amazon_store_names:
+  - Swingline
+- name: Kensington
+  amazon_store_names:
+  - Kensington
+- name: GBC
+  amazon_store_names:
+  - GBC
+- name: PowerA
+  amazon_store_names:
+  - PowerA
+mcauley_categories:
+- Office_Products
+- Electronics
+- Video_Games

@@ -1,0 +1,30 @@
+# One file per company. Add more with `reviewtone add-company`.
+# amazon_store_names: exact Amazon `store` names (matched case-insensitively).
+# mcauley_categories: Amazon Reviews 2023 categories searched by `reviewtone backfill`.
+ticker: MAT
+name: Mattel, Inc.
+fiscal_year_end: 12-31
+brands:
+- name: Barbie
+  amazon_store_names:
+  - Barbie
+- name: Fisher-Price
+  amazon_store_names:
+  - Fisher-Price
+  - FISHER-PRICE BABY
+- name: Hot Wheels
+  amazon_store_names:
+  - Hot Wheels
+- name: Mattel
+  amazon_store_names:
+  - Mattel
+  - Mattel Games
+  - WWE MATTEL
+- name: Mega Bloks
+  amazon_store_names:
+  - Mega Bloks
+- name: UNO
+  amazon_store_names:
+  - UNO
+mcauley_categories:
+- Toys_and_Games

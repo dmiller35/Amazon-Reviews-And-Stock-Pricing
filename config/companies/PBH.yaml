@@ -1,0 +1,41 @@
+# One file per company. Add more with `reviewtone add-company`.
+# amazon_store_names: exact Amazon `store` names (matched case-insensitively).
+# mcauley_categories: Amazon Reviews 2023 categories searched by `reviewtone backfill`.
+ticker: PBH
+name: Prestige Consumer Healthcare Inc.
+fiscal_year_end: 03-31
+brands:
+- name: Summer's Eve
+  amazon_store_names:
+  - Summer's Eve
+- name: DenTek
+  amazon_store_names:
+  - DenTek
+- name: Debrox
+  amazon_store_names:
+  - Debrox
+- name: Monistat
+  amazon_store_names:
+  - Monistat
+- name: Compound W
+  amazon_store_names:
+  - Compound W
+- name: Dramamine
+  amazon_store_names:
+  - Dramamine
+- name: Clear Eyes
+  amazon_store_names:
+  - Clear Eyes
+- name: Fleet
+  amazon_store_names:
+  - Fleet
+- name: Luden's
+  amazon_store_names:
+  - Ludens
+  - Luden's
+- name: Chloraseptic
+  amazon_store_names:
+  - Chloraseptic
+mcauley_categories:
+- Health_and_Household
+- Beauty_and_Personal_Care
