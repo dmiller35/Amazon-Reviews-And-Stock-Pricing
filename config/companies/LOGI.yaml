@@ -1,0 +1,11 @@
+# One file per company. Add more with `reviewtone add-company`.
+ticker: LOGI
+name: Logitech International S.A.
+fiscal_year_end: 03-31
+brands:
+- name: Logitech
+  amazon_store_names:
+  - Logitech
+  - Logitech G
+  - Logitech for Creators
+  - Logitech for Business

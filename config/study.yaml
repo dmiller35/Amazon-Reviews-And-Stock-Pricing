@@ -1,0 +1,69 @@
+# Pre-registered study definition.
+#
+# The rules below and each company file are recorded in
+# research/preregistration.json the first time results are written. After that,
+# changing the rules, or editing/removing a registered company, makes evaluation
+# refuse to run (unless you start a new study with --new-study), so thresholds
+# and companies can never be picked after seeing outcomes. New companies can be
+# added at any time; each is timestamped when it is registered.
+
+study:
+  name: amazon-review-tone-v1
+  primary_ticker: LOGI
+  research_dir: research
+
+# Universe: one YAML file per company in config/companies/ (the brands shown in
+# the source video, grouped by their SEC-registered parent). Add companies with
+# `reviewtone add-company`. Companies may be ADDED at any time; once a company
+# has results it can no longer be edited or removed (see preregistration).
+companies_dir: companies
+
+tone:
+  # claude: rubric scores -2..+2 via the Claude API (needs ANTHROPIC_API_KEY).
+  # naive_bayes: the paper's method; trained on a labelled sample (Claude labels
+  #   or a manual labels CSV) and applied to every review.
+  # lexicon: tiny offline word-list baseline for smoke tests only.
+  scorer: claude
+  claude_model: claude-opus-5-5
+  claude_effort: low
+  reviews_per_request: 25
+  # The paper scores the one-line review summary (title). We score title + body
+  # but never show the star rating, so tone stays a separate signal from rating.
+  include_body: true
+
+aggregation:
+  # A fiscal quarter with fewer product-opinion reviews than this is flagged sparse
+  # and never used for a call.
+  min_reviews_per_quarter: 30
+  # Quarters of history the prompt asks for before results are trusted.
+  target_complete_quarters: 12
+
+rules:
+  # Fixed decision rules evaluated on held-out quarters. Tone is on the paper's
+  # [-1, 1] scale (Claude's -2..+2 score divided by 2). The paper's AbnormalTone
+  # inter-quartile range was -0.084..0.075, so 0.05 is roughly a "clearly below
+  # its own recent baseline" move.
+  negative_swing_threshold: -0.05
+  positive_swing_threshold: 0.05
+  # Jin (2022) Tables 9-11: only negative swings predicted sales, earnings
+  # surprises and announcement returns; positive swings did not. So by default
+  # only negative swings produce a call.
+  call_positive_swings: false
+  # 0 = the quarter the reviews were written in (revenue is first reported after
+  # it ends, so the signal still leads the filing); 1 = the following quarter.
+  horizons: [0, 1]
+
+evaluation:
+  holdout_quarters: 8
+
+portfolio:
+  # Paper: quartiles. With fewer than 8 firms we fall back to halves.
+  groups: 4
+  min_firms_for_quartiles: 8
+  weighting: [review_count, equal]
+
+market:
+  # Carhart estimation window for announcement abnormal returns (trading days
+  # relative to the announcement date).
+  estimation_window: [-250, -30]
+  event_window: [-1, 1]

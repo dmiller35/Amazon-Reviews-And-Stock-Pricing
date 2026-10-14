@@ -1,0 +1,8 @@
+# One file per company. Add more with `reviewtone add-company`.
+ticker: PG
+name: The Procter & Gamble Company
+fiscal_year_end: 06-30
+brands:
+- name: Tide
+  amazon_store_names:
+  - Tide

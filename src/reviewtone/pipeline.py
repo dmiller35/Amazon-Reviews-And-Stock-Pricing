@@ -1,0 +1,322 @@
+"""Per-company research pipeline (prompt steps 1-7) and the universe portfolio.
+
+Each step writes into research/<TICKER>/ and records anything that limited it
+(unreachable source, thin data, missing history) in status.json, which the
+report turns into the Limitations section. Steps degrade instead of inventing
+data: no reviews -> no tone; no SEC access -> no outcomes; and so on.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
+
+import pandas as pd
+
+from . import aggregate, catalog, charts, evaluate, reviews as rv
+from .config import Company, Study
+from .fiscal import CALENDAR_QUARTERS, FiscalCalendar
+from .http import AccessLog, SourceUnavailable, utcnow
+from .tone import score_reviews
+
+
+@dataclass
+class Run:
+    study: Study
+    company: Company
+    as_of: date = field(default_factory=date.today)
+    scorer: str | None = None
+
+    @property
+    def scorer_name(self) -> str:
+        return self.scorer or self.study.tone["scorer"]
+
+    @property
+    def dir(self) -> Path:
+        d = self.study.ticker_dir(self.company.ticker)
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @property
+    def log(self) -> AccessLog:
+        return AccessLog(self.dir / "access_log.jsonl")
+
+    @property
+    def cal(self) -> FiscalCalendar:
+        v = self._status().get("verification", {})
+        month = self.company.fiscal_year_end_month
+        if v.get("sec_fiscal_year_end"):
+            from .fiscal import parse_sec_fiscal_year_end
+            month = parse_sec_fiscal_year_end(v["sec_fiscal_year_end"]) or month
+        return FiscalCalendar(month)
+
+    def _status(self) -> dict:
+        p = self.dir / "status.json"
+        return json.loads(p.read_text()) if p.exists() else {}
+
+    def note(self, step: str, **info) -> None:
+        status = self._status()
+        status[step] = {**info, "updated": utcnow()}
+        (self.dir / "status.json").write_text(json.dumps(status, indent=2, default=str))
+
+    # Step 1 ---------------------------------------------------------------
+    def verify(self) -> dict:
+        from .fundamentals.sec import verify_company
+        try:
+            v = verify_company(self.company.ticker, self.company.fiscal_year_end_month, self.company.name, self.log)
+        except (SourceUnavailable, KeyError) as e:
+            v = {"error": str(e), "fiscal_year_end_matches": None,
+                 "note": f"Unverified: using configured fiscal year end {self.company.fiscal_year_end}."}
+        self.note("verification", **v)
+        return v
+
+    # Step 2 ---------------------------------------------------------------
+    def build_catalog(self, meta_locations: list[str] | None = None) -> pd.DataFrame:
+        from .sources import mcauley
+        frames, errors = [], []
+        for loc in meta_locations or []:
+            try:
+                frames.append(mcauley.products_from_meta(loc, self.company, self.log))
+            except SourceUnavailable as e:
+                errors.append(str(e))
+        frames.append(catalog.load_seed(self.dir / "seed_asins.csv", self.company))
+        existing = self.dir / "products.csv"
+        if existing.exists():
+            frames.append(pd.read_csv(existing, dtype=str))
+        products, n_dupes = catalog.merge_products(*frames)
+        products.to_csv(existing, index=False)
+        self.note("catalog", products=len(products), duplicates_removed=n_dupes, errors=errors)
+        return products
+
+    # Step 3 ---------------------------------------------------------------
+    def fetch_reviews(self, source: str, *, review_locations: list[str] | None = None,
+                      max_reviews_per_product: int = 500, csv_path: str | None = None) -> int:
+        products = pd.read_csv(self.dir / "products.csv", dtype=str) if (self.dir / "products.csv").exists() \
+            else pd.DataFrame(columns=catalog.PRODUCT_COLUMNS)
+        frames, errors = [], []
+        if source in ("mcauley", "apify") and products.empty:
+            errors.append("products.csv is empty: run `reviewtone catalog --meta ...` or list ASINs in "
+                          f"{self.dir / 'seed_asins.csv'} (columns: asin,brand) first")
+        if source == "mcauley":
+            from .sources import mcauley
+            for loc in review_locations or []:
+                try:
+                    frames.append(mcauley.reviews_for_products(loc, products, self.company, self.log))
+                except SourceUnavailable as e:
+                    errors.append(str(e))
+        elif source == "apify":
+            from .sources.apify import ApifyReviews
+            client = ApifyReviews(log=self.log)
+            for p in products.itertuples():
+                try:
+                    df = client.fetch([p.asin], ticker=self.company.ticker, brand=p.brand,
+                                      max_reviews=max_reviews_per_product)
+                except SourceUnavailable as e:
+                    errors.append(str(e))
+                    if "APIFY_TOKEN" in str(e) or "unreachable" in str(e):
+                        break
+                    continue
+                frames.append(df.assign(parent_asin=df["parent_asin"].fillna(p.parent_asin)))
+                self._record_coverage(p.asin, df, max_reviews_per_product)
+        elif source == "csv":
+            frames.append(pd.read_csv(csv_path).assign(ticker=self.company.ticker))
+        else:
+            raise ValueError(f"unknown review source {source!r}")
+
+        new = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=rv.REVIEW_COLUMNS)
+        added = rv.append_new(self.dir / "reviews.csv", new) if len(new) else new
+        self.note(f"fetch_{source}", fetched=len(new), added=len(added), errors=errors[:10],
+                  n_errors=len(errors), **({"error": errors[0]} if errors and not len(new) else {}))
+        return len(added)
+
+    def _record_coverage(self, asin: str, df: pd.DataFrame, cap: int) -> None:
+        row = pd.DataFrame([{"asin": asin, "reviews": len(df), "oldest": df["review_date"].min() if len(df) else None,
+                             "hit_cap": len(df) >= cap, "fetched_at": utcnow()}])
+        path = self.dir / "coverage.csv"
+        row.to_csv(path, mode="a", header=not path.exists(), index=False)
+
+    # Step 4 ---------------------------------------------------------------
+    def score(self, scorer: str | None = None, sample: int | None = None) -> pd.DataFrame:
+        reviews = rv.load(self.dir / "reviews.csv")
+        if reviews.empty:
+            raise RuntimeError(f"No reviews for {self.company.ticker}; run `reviewtone fetch` first.")
+        name = scorer or self.scorer_name
+        scores = score_reviews(self.study, self.dir, reviews, name, sample=sample)
+        self.note("score", scorer=name, scored=len(scores), reviews=len(reviews))
+        return scores
+
+    def _scores(self) -> pd.DataFrame:
+        from .tone import latest_valid, load_scores
+        name = self.scorer_name
+        file = "scores_naive_bayes.csv" if name == "naive_bayes" else "scores.csv"
+        return latest_valid(load_scores(self.dir / file), name)
+
+    # Step 5 ---------------------------------------------------------------
+    def aggregate(self, cal: FiscalCalendar | None = None, write: bool = True) -> pd.DataFrame:
+        reviews = rv.load(self.dir / "reviews.csv")
+        scored = aggregate.attach_scores(reviews, self._scores())
+        cov_path = self.dir / "coverage.csv"
+        coverage_start = aggregate.coverage_start_from_log(pd.read_csv(cov_path)) if cov_path.exists() else None
+        q = aggregate.quarterly_measures(scored, cal or self.cal,
+                                         min_reviews=self.study.aggregation["min_reviews_per_quarter"],
+                                         as_of=self.as_of, coverage_start=coverage_start)
+        if write and len(q):
+            q.to_csv(self.dir / "quarterly.csv", index=False)
+            cdir = self.dir / "charts"
+            cdir.mkdir(exist_ok=True)
+            charts.tone_and_counts(q, self.company.ticker, cdir / "tone_and_counts.png")
+            charts.negative_swing(q, self.company.ticker, self.study.rules["negative_swing_threshold"],
+                                  cdir / "negative_swing.png")
+            self.note("aggregate", **aggregate.history_status(q, self.study.aggregation["target_complete_quarters"]),
+                      coverage_start=coverage_start, unscored_reviews=int(scored["tone"].isna().sum()))
+        return q
+
+    # Step 6 ---------------------------------------------------------------
+    def fundamentals(self) -> pd.DataFrame | None:
+        from .fundamentals.outcomes import build_fundamentals
+        try:
+            f = build_fundamentals(self.company.ticker, self.cal, self.log)
+        except (SourceUnavailable, KeyError, ValueError) as e:
+            self.note("fundamentals", error=str(e))
+            return None
+        f.to_csv(self.dir / "fundamentals.csv", index=False)
+        self.note("fundamentals", quarters=int(f["revenue"].notna().sum()),
+                  first=f["fiscal_quarter"].dropna().iloc[0], last=f["fiscal_quarter"].dropna().iloc[-1],
+                  q4_derived=int(f["revenue_q4_derived"].fillna(False).astype(bool).sum()))
+        return f
+
+    def announcement_returns(self, fundamentals: pd.DataFrame, factors: pd.DataFrame | None) -> pd.DataFrame | None:
+        from .market.data import daily_returns
+        from .market.models import announcement_return
+        if factors is None:
+            return None
+        try:
+            ret = daily_returns(self.company.ticker, log=self.log)
+        except SourceUnavailable as e:
+            self.note("prices", error=str(e))
+            return None
+        m = self.study.market
+        rows = []
+        for r in fundamentals.dropna(subset=["announcement_date"]).itertuples():
+            ev = announcement_return(ret, factors, r.announcement_date, tuple(m["estimation_window"]),
+                                     tuple(m["event_window"]))
+            if ev:
+                rows.append({"fq_index": r.fq_index, "announcement_date": r.announcement_date,
+                             "event_day": ev.event_day, "car": ev.car, "bhar": ev.bhar})
+        out = pd.DataFrame(rows, columns=["fq_index", "announcement_date", "event_day", "car", "bhar"])
+        out.to_csv(self.dir / "announcement_returns.csv", index=False)
+        self.note("prices", announcements_with_returns=len(out), last_price=str(ret.index.max().date()))
+        return out
+
+    def evaluate(self, quarterly: pd.DataFrame, fundamentals: pd.DataFrame | None,
+                 ann: pd.DataFrame | None) -> dict | None:
+        if fundamentals is None or quarterly.empty:
+            self.note("evaluation", skipped="needs both quarterly tone and SEC revenue")
+            return None
+        panel = evaluate.build_panel(quarterly, fundamentals, self.study.rules, ann)
+        panel.insert(0, "ticker", self.company.ticker)
+        results = evaluate.write_evaluation(self.dir, panel, self.study.evaluation["holdout_quarters"])
+        held = evaluate.holdout(panel, self.study.evaluation["holdout_quarters"], 0)["signal_quarter"].tolist()
+        charts.tone_vs_sales(panel, self.company.ticker, held, self.dir / "charts" / "tone_vs_sales.png")
+        self.note("evaluation", **{k: v["summary"] for k, v in results.items()})
+        return results
+
+    # Step 7 ---------------------------------------------------------------
+    def snapshot(self) -> Path:
+        """Copy dated outputs into history/<date>/ so every weekly state is kept."""
+        dest = self.dir / "history" / self.as_of.isoformat()
+        dest.mkdir(parents=True, exist_ok=True)
+        for name in ("quarterly.csv", "prediction.json", "evaluation.json", "status.json"):
+            if (self.dir / name).exists():
+                shutil.copy2(self.dir / name, dest / name)
+        return dest
+
+
+def run_company(study: Study, ticker: str, *, source: str | None, factors: pd.DataFrame | None,
+                meta: list[str] | None = None, review_files: list[str] | None = None, csv_path: str | None = None,
+                max_reviews: int = 500, scorer: str | None = None, new_study: bool = False,
+                as_of: date | None = None) -> dict:
+    from .predict import prediction_card
+    from .report import write_report
+
+    run = Run(study, study.company(ticker), as_of=as_of or date.today(), scorer=scorer)
+    run.verify()
+    run.build_catalog(meta)
+    if source:
+        run.fetch_reviews(source, review_locations=review_files, max_reviews_per_product=max_reviews,
+                          csv_path=csv_path)
+    if rv.load(run.dir / "reviews.csv").empty:
+        run.note("aggregate", error="no reviews collected")
+        q = pd.DataFrame()
+    else:
+        try:
+            run.score()
+        except Exception as e:  # scorer unavailable: keep what was scored before
+            run.note("score", error=f"{type(e).__name__}: {e}")
+        q = run.aggregate()
+    fund = run.fundamentals()
+    ann = run.announcement_returns(fund, factors) if fund is not None else None
+    results = None
+    if len(q) and fund is not None:
+        evaluate.check_preregistration(study, new_study)
+        results = run.evaluate(q, fund, ann)
+    card = prediction_card(ticker, q, fund, study.rules, results, run.as_of) if len(q) else {
+        "ticker": ticker, "status": "no review data"}
+    (run.dir / "prediction.json").write_text(json.dumps(card, indent=2, default=str))
+    write_report(run, q, card, results)
+    run.snapshot()
+    return card
+
+
+def run_universe(study: Study, factors: pd.DataFrame | None, as_of: date | None = None) -> dict:
+    """Calendar-quarter long/short portfolio over every company with scored reviews."""
+    from . import portfolio
+    from .market.data import daily_returns
+
+    out_dir = study.research_dir / "_universe"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    measures, returns, missing = {}, {}, []
+    for c in study.universe:
+        run = Run(study, c, as_of=as_of or date.today())
+        if rv.load(run.dir / "reviews.csv").empty:
+            missing.append(f"{c.ticker}: no reviews")
+            continue
+        measures[c.ticker] = run.aggregate(cal=CALENDAR_QUARTERS, write=False)
+        try:
+            returns[c.ticker] = daily_returns(c.ticker, log=run.log)
+        except SourceUnavailable as e:
+            missing.append(f"{c.ticker}: prices unavailable ({e})")
+    summary = {"as_of": (as_of or date.today()).isoformat(), "firms_with_reviews": sorted(measures),
+               "missing": missing}
+    if factors is None or not returns:
+        summary["error"] = "needs Carhart factors and prices; see missing"
+    else:
+        evaluate.check_preregistration(study)
+        pos, q, alphas, latest = portfolio.run(measures, returns, factors, study.portfolio)
+        pos.to_csv(out_dir / "positions.csv", index=False)
+        q.to_csv(out_dir / "strategy_returns.csv", index=False)
+        if len(q):
+            charts.portfolio_cumulative(q, out_dir / "long_short.png")
+        summary["alphas"] = alphas
+        if len(latest):
+            k = int(latest["n_groups"].iloc[0])
+            summary["latest_formation"] = {
+                "formation_quarter": latest["fiscal_quarter"].iloc[0],
+                "long": latest.loc[latest["group"] == k, "ticker"].tolist(),
+                "short": latest.loc[latest["group"] == 1, "ticker"].tolist(),
+                "groups": k,
+            }
+    panels = [pd.read_csv(study.ticker_dir(t) / "panel.csv") for t in measures
+              if (study.ticker_dir(t) / "panel.csv").exists()]
+    if panels:  # pooled, descriptive replication of Jin (2022) Eq. 1
+        pooled = pd.concat(panels, ignore_index=True)
+        for y in ("AbnormalSales", "SameQtrSalesGrowth"):
+            table = evaluate.paper_regression(pooled, y)
+            if table is not None:
+                table.to_csv(out_dir / f"paper_eq1_{y}.csv")
+                summary[f"paper_eq1_{y}_AbnormalTone"] = table.loc["AbnormalTone", ["coef", "t", "n"]].to_dict()
+    (out_dir / "portfolio.json").write_text(json.dumps(summary, indent=2, default=str))
+    return summary

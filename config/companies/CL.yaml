@@ -1,0 +1,8 @@
+# One file per company. Add more with `reviewtone add-company`.
+ticker: CL
+name: Colgate-Palmolive Company
+fiscal_year_end: 12-31
+brands:
+- name: Colgate
+  amazon_store_names:
+  - Colgate

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+# Raw downloads and HTTP cache can be large; research outputs are committed.
+data/raw/
+data/cache/
+.env
+.pytest_cache/

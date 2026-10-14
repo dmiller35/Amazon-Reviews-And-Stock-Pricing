@@ -1,0 +1,11 @@
+# One file per company. Add more with `reviewtone add-company`.
+ticker: HELE
+name: Helen of Troy Limited
+fiscal_year_end: 02-28
+brands:
+- name: OXO
+  amazon_store_names:
+  - OXO
+- name: Hydro Flask
+  amazon_store_names:
+  - Hydro Flask

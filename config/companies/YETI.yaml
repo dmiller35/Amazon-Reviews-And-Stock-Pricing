@@ -1,0 +1,8 @@
+# One file per company. Add more with `reviewtone add-company`.
+ticker: YETI
+name: YETI Holdings, Inc.
+fiscal_year_end: 12-31
+brands:
+- name: YETI
+  amazon_store_names:
+  - YETI

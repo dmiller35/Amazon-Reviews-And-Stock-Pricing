@@ -1,0 +1,169 @@
+# Amazon review tone → revenue & stock predictor
+
+`reviewtone` turns Amazon US product reviews into a quarterly signal that tries to
+anticipate a company's revenue and its stock's reaction to earnings. It implements:
+
+- **Jin, "More than Words: Can Tone of Consumer Product Reviews Help Predict Firms'
+  Fundamentals?"** (SSRN 4291019). Across 18.8M Amazon reviews of 292 firms
+  (1996–2014), the change in review tone (*AbnormalTone*) predicted quarterly sales,
+  earnings surprises, earnings-announcement returns and risk. A long/short portfolio
+  sorted on it earned about 0.6% a quarter of Carhart alpha. Negative swings carried
+  the signal; positive swings did not.
+- **The 7-step "Amazon review research" prompt** from the TikTok: one company, a
+  reproducible research folder, fixed rules, eight held-out quarters, misses shown,
+  weekly updates, and honest limits.
+
+> Not investment advice. This is a research tool. A single company over a few
+> years cannot confirm the paper; the reports say so in every output.
+
+## How the predictor works
+
+1. **Signal.** Every review is scored for tone from −2 to +2 by Claude, using a
+   fixed rubric (`src/reviewtone/tone/rubric.py`). The star rating is hidden from
+   the scorer, so tone is measured separately from rating, as in the paper. Claude
+   also tags reasons (defect, quality decline, durability, price…) and flags
+   seller/shipping-only reviews, which are left out of the tone average. For each
+   fiscal quarter:
+   `AbnormalTone = mean tone this quarter − mean of the prior four quarterly means`
+   (on the paper's −1..1 scale).
+2. **Call.** At quarter end, if `AbnormalTone ≤ −0.05` and the data is usable
+   (enough reviews, a full baseline, complete coverage), the call is **slowdown**:
+   revenue growth below its recent trend and a weak earnings-day reaction. Other
+   quarters get no call. The thresholds are in `config/study.yaml`.
+3. **Outcome.** Revenue comes from SEC XBRL, using the value as first reported.
+   The call is a hit if the *growth surprise* (year-over-year growth minus its
+   prior four-quarter average) is negative. The stock outcome is the Carhart
+   abnormal return over days −1..+1 around the earnings 8-K (item 2.02).
+4. **Universe portfolio** (`reviewtone portfolio`). At each calendar quarter end,
+   firms are sorted on AbnormalTone. The strategy goes long the top group and short
+   the bottom group, review-count and equal weighted, and the result is regressed
+   on Carhart factors (the paper's Table 6). The latest sort is the live long/short
+   list.
+
+### Deliberate changes from the paper and the prompt
+
+| Choice | Why |
+|---|---|
+| Claude rubric (−2..+2) instead of Naive Bayes; NB still available (`--scorer naive_bayes`) and trainable on Claude labels or your own hand-coded `labels.csv` | The paper's NB used 15k hand-coded summaries we don't have. The prompt asked for "Jev if available, otherwise Claude", and Jev has no public API, so the default is Claude. |
+| Title **and** body scored (paper: title only); `include_body: false` restores the paper | Modern reviews are long and the body carries the defect detail ("double left click of doom"). |
+| Single-company outcome is the **growth surprise**, not AbnormalSales | AbnormalSales is dominated by seasonality for one firm (Logitech's holiday quarter). The paper absorbed that with pooled fixed effects. AbnormalSales and YoY growth are still in `panel.csv`. |
+| Only **negative** swings produce calls (`call_positive_swings: false`) | Tables 9–11: positive swings predicted nothing. |
+| Revenue "as first reported", Q4 derived from the 10-K | No look-ahead from restatements. |
+| No I/B/E/S consensus, so no earnings-surprise regression | Not freely available. The announcement return captures the market's surprise instead. |
+| Per-company pre-registration lock | Companies can be added at any time, but once a company has results it can't be edited or dropped, and the rules can't change. That enforces "never select companies after results". |
+
+## Setup
+
+```bash
+pip install -e '.[dev]'
+export ANTHROPIC_API_KEY=...                 # tone scoring
+export APIFY_TOKEN=...                       # live Amazon reviews
+export SEC_USER_AGENT="Your Name you@example.com"   # SEC asks for a contact
+pytest                                       # offline tests on synthetic data
+```
+
+Hosts that must be reachable: `api.anthropic.com`, `api.apify.com`, `data.sec.gov`,
+`www.sec.gov`, `query1.finance.yahoo.com` (or `stooq.com`), and
+`mba.tuck.dartmouth.edu` (Fama-French/Carhart factors). Add
+`datarepo.eng.ucsd.edu` for the historical backtest data.
+
+## Running it (the 7 prompt steps)
+
+```bash
+reviewtone verify --ticker LOGI            # 1. CIK, registrant, fiscal year end vs SEC
+reviewtone catalog --ticker LOGI --meta <meta_Electronics.jsonl.gz>   # 2. products.csv
+reviewtone fetch --ticker LOGI --source apify          # 3. reviews.csv (+ coverage/limits)
+reviewtone score --ticker LOGI                         # 4. Claude tone, tags, rubric.md
+reviewtone run --ticker LOGI                           # 5-7. quarters, charts, SEC join,
+                                                       #      held-out eval, prediction, report
+reviewtone run --all && reviewtone portfolio           # whole universe + long/short
+```
+
+`run` also takes `--source apify|mcauley|csv` to fetch before running. Each step
+records what limited it, so a blocked source shows up in the report's
+Limitations section and isn't papered over.
+
+### History: live scraping vs. the McAuley dataset
+
+Amazon shows a scraper only the most recent few hundred reviews per product, so
+Apify rarely reaches the 12 complete quarters the prompt asks for. Products that hit
+the per-product cap are recorded in `coverage.csv`, and earlier quarters are marked
+`partial_coverage` and never used for calls. For a real multi-year backtest, use the
+McAuley Lab **Amazon Reviews 2023** dataset (reviews through Sep 2023; the paper used
+the same lab's earlier release):
+
+```bash
+reviewtone run --ticker LOGI --source mcauley \
+  --meta    https://datarepo.eng.ucsd.edu/mcauley_group/data/amazon_2023/raw/meta_categories/meta_Electronics.jsonl.gz \
+  --reviews https://datarepo.eng.ucsd.edu/mcauley_group/data/amazon_2023/raw/review_categories/Electronics.jsonl.gz
+```
+
+Then layer Apify on top for the quarters since. Both sources de-duplicate into the
+same append-only `reviews.csv`. Scoring a whole category history with Claude is the
+expensive part. The cheaper route is the paper's: label a sample with Claude
+(`reviewtone score --sample 1500`), then `--scorer naive_bayes` trains on those
+labels and scores everything (holdout accuracy goes to `models/naive_bayes.json`).
+
+## Adding a company
+
+```bash
+reviewtone add-company GRMN --brand "Garmin=Garmin,Garmin Store"
+reviewtone add-company HBB --brand "Hamilton Beach" --name "Hamilton Beach Brands" --fye 12-31 --asins B0XXXXXXX1
+```
+
+This writes `config/companies/<TICKER>.yaml`. The registrant name and fiscal year
+end are looked up on SEC EDGAR unless you pass them. `--brand` takes the brand and,
+after `=`, its exact Amazon storefront/`store` names (default: the brand name).
+Repeat `--brand` for multi-brand companies. Optional `--asins` seeds
+`research/<TICKER>/seed_asins.csv`. You can also just copy an existing file in
+`config/companies/`.
+
+The starting universe is the brands shown in the video: Logitech (LOGI),
+Shark/Ninja (SN), OXO/Hydro Flask (HELE), Rubbermaid/Sharpie (NWL), Tide (PG),
+Colgate (CL) and YETI. With fewer than 8 firms the portfolio uses halves instead of
+quartiles, and alphas on a handful of quarters are noise. Adding companies helps
+more than anything else.
+
+## Weekly updates
+
+`scripts/weekly_update.sh` (cron example inside) runs `reviewtone update`. It fetches
+the newest reviews for every catalogued product, scores only reviews not yet scored,
+re-evaluates, rebuilds reports, and snapshots `quarterly.csv`, `prediction.json`,
+`evaluation.json` and `status.json` into `research/<TICKER>/history/<date>/`.
+`reviews.csv` and `scores.csv` are append-only.
+
+## Output folder (`research/<TICKER>/`)
+
+| File | Contents |
+|---|---|
+| `README.md` | Prediction, data status (flags **INSUFFICIENT HISTORY**), charts, held-out table with every miss, sources, limitations |
+| `products.csv` | ASIN, parent ASIN, title, store, URL, discovery source |
+| `reviews.csv` / `coverage.csv` | Dated review text, IDs, ASINs, source URLs; per-product fetch depth and caps |
+| `scores.csv`, `rubric.md`, `models/` | Tone, tags, seller/shipping flag, model and rubric version |
+| `quarterly.csv` | Per fiscal quarter: counts, mean/sd tone and rating, tag shares, AbnormalTone/Rating/ReviewCnt, sparse/coverage flags |
+| `fundamentals.csv` | SEC revenue (first reported, filing date), net income, assets, R&D, EPS, announcement dates, outcomes |
+| `panel.csv`, `evaluation_h0.csv`, `evaluation_h1.csv`, `evaluation.json` | Signal↔outcome join, held-out quarters, hits and misses |
+| `prediction.json` | The live call |
+| `access_log.jsonl`, `status.json` | Every request and its status; what each step did or why it couldn't |
+
+`research/preregistration.json` holds the locked rules and the companies with their
+registration dates. `research/_universe/` holds the portfolio positions, returns,
+alphas and the latest long/short list.
+
+## Code map
+
+```
+config/study.yaml, config/companies/*.yaml   study settings, rules, universe
+src/reviewtone/
+  fiscal.py            fiscal calendars (FY named by end year; 52/53-week matching)
+  sources/apify.py     Apify actor client, tolerant field mapping, coverage logging
+  sources/mcauley.py   Amazon Reviews 2023 streaming filter by storefront
+  catalog.py reviews.py   products.csv; review schema, de-dup, append-only store
+  tone/                rubric, Claude scorer, Naive Bayes (paper), lexicon (tests)
+  aggregate.py         quarterly measures and AbnormalTone family
+  fundamentals/        SEC XBRL quarterly values, Q4 derivation, 8-K dates, outcomes
+  market/              prices, Ken French factors, CAR/BHAR, portfolio alpha
+  evaluate.py          pre-registration, fixed rules, held-out evaluation, Eq.1 OLS
+  portfolio.py         calendar-time long/short (Table 6)
+  predict.py report.py charts.py pipeline.py cli.py
+```

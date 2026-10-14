@@ -1,0 +1,13 @@
+# One file per company. Add more with `reviewtone add-company`.
+ticker: SN
+name: SharkNinja, Inc.
+fiscal_year_end: 12-31
+brands:
+- name: Shark
+  amazon_store_names:
+  - Shark
+  - SharkNinja
+- name: Ninja
+  amazon_store_names:
+  - Ninja
+  - SharkNinja

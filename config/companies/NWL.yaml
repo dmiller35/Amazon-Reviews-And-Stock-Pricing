@@ -1,0 +1,12 @@
+# One file per company. Add more with `reviewtone add-company`.
+ticker: NWL
+name: Newell Brands Inc.
+fiscal_year_end: 12-31
+brands:
+- name: Rubbermaid
+  amazon_store_names:
+  - Rubbermaid
+  - Rubbermaid Commercial Products
+- name: Sharpie
+  amazon_store_names:
+  - Sharpie
