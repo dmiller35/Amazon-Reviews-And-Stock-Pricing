@@ -421,3 +421,16 @@ def test_request_sizes_follow_review_rate(study):
     full5 = pd.DataFrame({"rating": [5.0] * sizes[5], "review_date": ["2026-10-08"] * sizes[5]})
     assert completeness(full5, prof.cap(sizes), by_star=True) == (True, "2026-10-08")  # filled list -> truncated
     assert BUILTIN["junglee~amazon-reviews-scraper"].cap(50) == 50
+
+
+def test_apify_402_stops_with_clear_message(monkeypatch):
+    from reviewtone.sources import apify
+
+    class R:
+        status_code, text = 402, '{"error": {}}'
+
+    monkeypatch.setattr(apify.requests, "request", lambda *a, **k: R())
+    monkeypatch.setattr(apify.time, "sleep", lambda s: None)
+    monkeypatch.setenv("APIFY_TOKEN", "t")
+    with pytest.raises(apify.SourceUnavailable, match="unreachable: HTTP 402"):
+        apify.ApifyReviews().run({"x": 1}, asin="A")

@@ -134,8 +134,8 @@ How it is used:
 - **Only each company's 10 most-reviewed live products are followed**
   (`apify.top_products`).
 
-Rough cost with 16 companies × 10 products: the first fetch is at most 5 stars ×
-100 reviews × $0.0018 per product (about $144 in total, usually less), then about
+Rough cost with 15 companies × 10 products: the first fetch is at most 5 stars ×
+100 reviews × $0.0018 per product (about $135 in total, usually less), then about
 $10–15 a week. Apify's free plan includes only a small monthly credit; check your
 Apify billing page and set a spending limit.
 
@@ -177,13 +177,13 @@ Repeat `--brand` for multi-brand companies. Optional `--asins` seeds
 `research/<TICKER>/seed_asins.csv`. You can also just copy an existing file in
 `config/companies/`.
 
-### The universe (16 companies)
+### The universe (15 companies)
 
 **From the video (7):** Logitech (LOGI), SharkNinja (SN), Helen of Troy (OXO,
 Hydro Flask; HELE), Newell (Rubbermaid, Sharpie; NWL), Procter & Gamble (Tide;
 PG), Colgate-Palmolive (CL) and YETI.
 
-**Added after research (9).** Each one's latest 10-K names Amazon as a major
+**Added after research (8).** Each one's latest 10-K names Amazon as a major
 customer, it sells under a few recognisable brands with their own Amazon
 storefronts, and it has heavy review volume in the historical dataset:
 
@@ -191,7 +191,6 @@ storefronts, and it has heavy review volume in the historical dataset:
 |---|---|---|---|
 | CRSR | Corsair Gaming | 27.4% (2025) | Corsair, Elgato, SCUF |
 | HBB | Hamilton Beach Brands | 19% (2025) | Hamilton Beach, Proctor Silex |
-| SMPL | Simply Good Foods | 18% (FY2025) | Quest, Atkins, OWYN |
 | PBH | Prestige Consumer Healthcare | 15% (FY2026) | Summer's Eve, DenTek, Debrox, Monistat, Compound W, Dramamine, Clear Eyes, Fleet, Luden's, Chloraseptic |
 | TBCH | Turtle Beach | 14–28% (2025; one of three largest customers) | Turtle Beach, PDP |
 | ELF | e.l.f. Beauty | 11% (FY2026) | e.l.f., Naturium |
@@ -199,11 +198,14 @@ storefronts, and it has heavy review volume in the historical dataset:
 | ACCO | ACCO Brands | 10% (2025) | AT-A-GLANCE, Mead, Five Star, Swingline, Kensington, GBC, PowerA |
 | BRBR | BellRing Brands | Walmart, Costco and Amazon together: 74% | Premier Protein, Dymatize |
 
-Considered and left out: Hasbro, Funko, GoPro, Sonos and Garmin (Amazon not
+Considered and left out: Simply Good Foods (Quest, Atkins). Amazon is 18% of its
+sales, but its snack and shake listings turn over so fast that only 1 of its 60
+most-reviewed 2023 products still collects reviews, so there's no continuous
+product set to measure. Also Hasbro, Funko, GoPro, Sonos and Garmin (Amazon not
 disclosed as a major customer), Lifetime Brands (licensed brands like KitchenAid
 make storefronts ambiguous), JAKKS Pacific (mostly licensed character toys), and
 Kimberly-Clark, Church & Dwight and Clorox (Amazon too small a share to matter).
-With 16 firms the portfolio uses quartiles, as in the paper.
+With 15 firms the portfolio uses quartiles, as in the paper.
 
 ## Weekly updates
 

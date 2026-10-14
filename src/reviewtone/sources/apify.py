@@ -270,7 +270,17 @@ class ApifyReviews:
 
     def run(self, payload: dict[str, Any], *, asin: str = "", timeout_s: int = 900) -> list[dict[str, Any]]:
         """Start an actor run, wait for it with short polls, return its dataset items."""
-        resp = self._call("POST", f"/acts/{self.actor}/runs", json=payload)
+        for attempt in range(8):
+            resp = self._call("POST", f"/acts/{self.actor}/runs", json=payload)
+            if resp.status_code != 402:
+                break
+            # 402 = too many concurrent runs for the plan's memory (wait for one to
+            # finish), or the monthly credit is used up (waiting won't help).
+            time.sleep(min(120, 15 * (attempt + 1)))
+        if resp.status_code == 402:
+            raise SourceUnavailable("Apify unreachable: HTTP 402 persisted. Either the account's monthly credit is "
+                                    "used up (console.apify.com/billing) or too many runs were started at once "
+                                    f"for the plan's memory limit. Details: {resp.text[:200]}")
         if resp.status_code not in (200, 201):
             raise SourceUnavailable(f"Apify actor {self.actor} returned HTTP {resp.status_code}: {resp.text[:300]}")
         run = resp.json()["data"]
