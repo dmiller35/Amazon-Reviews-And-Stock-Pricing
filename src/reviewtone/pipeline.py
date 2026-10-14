@@ -110,6 +110,7 @@ class Run:
         elif source == "apify":
             from .sources.apify import ApifyReviews
             client = ApifyReviews(log=self.log)
+            stored = rv.load(self.dir / "reviews.csv")
             for p in products.itertuples():
                 try:
                     df = client.fetch([p.asin], ticker=self.company.ticker, brand=p.brand,
@@ -120,7 +121,9 @@ class Run:
                         break
                     continue
                 frames.append(df.assign(parent_asin=df["parent_asin"].fillna(p.parent_asin)))
-                self._record_coverage(p.asin, df, max_reviews_per_product)
+                mine = stored[(stored["asin"] == p.asin) | (stored["parent_asin"] == p.asin)]
+                self._record_coverage(p.asin, df, max_reviews_per_product,
+                                      mine["review_date"].max() if len(mine) else None)
         elif source == "csv":
             frames.append(pd.read_csv(csv_path).assign(ticker=self.company.ticker))
         else:
@@ -132,9 +135,21 @@ class Run:
                   n_errors=len(errors), **({"error": errors[0]} if errors and not len(new) else {}))
         return len(added)
 
-    def _record_coverage(self, asin: str, df: pd.DataFrame, cap: int) -> None:
-        row = pd.DataFrame([{"asin": asin, "reviews": len(df), "oldest": df["review_date"].min() if len(df) else None,
-                             "hit_cap": len(df) >= cap, "fetched_at": utcnow()}])
+    def _record_coverage(self, asin: str, df: pd.DataFrame, cap: int, stored_newest: str | None) -> None:
+        """Log fetch depth and any hole it leaves in the product's history.
+
+        A fetch that hits the cap returns only the newest `cap` reviews. If its
+        oldest review is still newer than the newest one already stored (from
+        an earlier fetch or the historical dataset), reviews in between are
+        missing: that window is a gap. Overlapping fetches leave no gap.
+        """
+        oldest = df["review_date"].min() if len(df) else None
+        hit_cap = len(df) >= cap
+        gap = hit_cap and oldest is not None and (stored_newest is None or oldest > stored_newest)
+        row = pd.DataFrame([{"asin": asin, "reviews": len(df), "oldest": oldest,
+                             "newest": df["review_date"].max() if len(df) else None, "hit_cap": hit_cap,
+                             "gap_start": stored_newest if gap else None, "gap_end": oldest if gap else None,
+                             "fetched_at": utcnow()}])
         path = self.dir / "coverage.csv"
         row.to_csv(path, mode="a", header=not path.exists(), index=False)
 
@@ -159,10 +174,10 @@ class Run:
         reviews = rv.load(self.dir / "reviews.csv")
         scored = aggregate.attach_scores(reviews, self._scores())
         cov_path = self.dir / "coverage.csv"
-        coverage_start = aggregate.coverage_start_from_log(pd.read_csv(cov_path)) if cov_path.exists() else None
+        gaps = aggregate.coverage_gaps(pd.read_csv(cov_path)) if cov_path.exists() else []
         q = aggregate.quarterly_measures(scored, cal or self.cal,
                                          min_reviews=self.study.aggregation["min_reviews_per_quarter"],
-                                         as_of=self.as_of, coverage_start=coverage_start)
+                                         as_of=self.as_of, gaps=gaps)
         if write and len(q):
             q.to_csv(self.dir / "quarterly.csv", index=False)
             cdir = self.dir / "charts"
@@ -171,7 +186,7 @@ class Run:
             charts.negative_swing(q, self.company.ticker, self.study.rules["negative_swing_threshold"],
                                   cdir / "negative_swing.png")
             self.note("aggregate", **aggregate.history_status(q, self.study.aggregation["target_complete_quarters"]),
-                      coverage_start=coverage_start, unscored_reviews=int(scored["tone"].isna().sum()))
+                      coverage_gaps=len(gaps), unscored_reviews=int(scored["tone"].isna().sum()))
         return q
 
     # Step 6 ---------------------------------------------------------------

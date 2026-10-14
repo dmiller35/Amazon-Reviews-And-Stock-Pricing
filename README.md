@@ -85,10 +85,16 @@ Limitations section and isn't papered over.
 
 ### History: live scraping vs. the McAuley dataset
 
-Amazon shows a scraper only the most recent few hundred reviews per product, so
-Apify rarely reaches the 12 complete quarters the prompt asks for. Products that hit
-the per-product cap are recorded in `coverage.csv`, and earlier quarters are marked
-`partial_coverage` and never used for calls. For a real multi-year backtest, use the
+Live reviews from Apify are what the current prediction runs on. The catch is
+depth: Amazon shows a scraper only the newest few hundred reviews per product, and
+AbnormalTone needs the four quarters before the signal quarter as its baseline.
+When a fetch hits the per-product cap, any window between the reviews already
+stored and the oldest one fetched is recorded as a gap in `coverage.csv`. Quarters
+that overlap a gap, or whose baseline does, are marked `partial_coverage` /
+`partial_baseline` and never used for calls. Fetches that overlap stored reviews,
+like a normal weekly update, leave no gap. So history grows forward on its own,
+and you can make the first fetch reach further back with `--max-reviews`.
+For a multi-year backtest without waiting, use the
 McAuley Lab **Amazon Reviews 2023** dataset (reviews through Sep 2023; the paper used
 the same lab's earlier release):
 

@@ -190,3 +190,30 @@ def test_add_company_and_per_company_lock(study):
     (s2.companies_dir / "YETI.yaml").unlink()  # removing a registered company is not
     with pytest.raises(PreregistrationError):
         check_preregistration(load_study(study.path))
+
+
+def test_coverage_gaps_only_flag_missing_windows(study):
+    from reviewtone.pipeline import Run
+
+    run = Run(study, study.company("LOGI"))
+    capped = pd.DataFrame({"review_date": pd.date_range("2026-05-01", periods=100, freq="D").strftime("%Y-%m-%d")})
+    # Historical data ends 2023-09-28, first live fetch is capped at 100 reviews starting 2026-05-01: a gap.
+    run._record_coverage("A1", capped, cap=100, stored_newest="2023-09-28")
+    # Next week's capped fetch overlaps what is stored: no new gap.
+    run._record_coverage("A1", capped.iloc[10:].reset_index(drop=True), cap=100, stored_newest="2026-08-08")
+    # A product with no history whose fetch did not hit the cap is complete: no gap.
+    run._record_coverage("B2", capped.iloc[:20], cap=100, stored_newest=None)
+    gaps = aggregate.coverage_gaps(pd.read_csv(run.dir / "coverage.csv"))
+    assert gaps == [(date(2023, 9, 28), date(2026, 5, 1))]
+
+    rows = [{"review_id": f"{d}-{i}", "review_date": d, "rating": 4.0, "tone": 0.5, "tags": "",
+             "seller_shipping_only": False}
+            for d in pd.date_range("2022-01-15", "2027-12-15", freq="MS").strftime("%Y-%m-%d") for i in range(15)]
+    q = aggregate.quarterly_measures(pd.DataFrame(rows), LOGI, min_reviews=30, as_of=date(2027, 12, 31), gaps=gaps)
+    flags = q.set_index("fiscal_quarter")
+    assert not flags.loc["FY24Q1", "partial_coverage"]          # Apr-Jun 2023: before the gap
+    assert flags.loc["FY24Q2", "partial_coverage"]              # Jul-Sep 2023: gap starts
+    assert flags.loc["FY27Q1", "partial_coverage"]              # Apr-Jun 2026: gap ends inside
+    assert not flags.loc["FY27Q2", "partial_coverage"]          # Jul-Sep 2026: complete again
+    assert flags.loc["FY28Q1", "partial_baseline"]              # baseline still reaches into the gap
+    assert flags.loc["FY28Q3", "usable"]                        # four clean quarters later: callable

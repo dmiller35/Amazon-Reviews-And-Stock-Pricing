@@ -24,6 +24,7 @@ def prediction_card(ticker: str, quarterly: pd.DataFrame, fundamentals: pd.DataF
     call = make_call(r["AbnormalTone"], bool(r["usable"]), rules)
     blockers = [name for name, flag in (("sparse quarter", r["sparse"]), ("sparse baseline", r["sparse_baseline"]),
                                          ("partial review coverage", r["partial_coverage"]),
+                                         ("baseline has partial coverage", r["partial_baseline"]),
                                          ("fewer than 4 prior quarters", pd.isna(r["AbnormalTone"]))) if flag]
     card = {
         "ticker": ticker,

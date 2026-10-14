@@ -29,12 +29,14 @@ def attach_scores(reviews: pd.DataFrame, scores: pd.DataFrame) -> pd.DataFrame:
 
 
 def quarterly_measures(scored: pd.DataFrame, cal: FiscalCalendar, *, min_reviews: int,
-                       as_of: date | None = None, coverage_start: date | None = None) -> pd.DataFrame:
+                       as_of: date | None = None,
+                       gaps: list[tuple[date | None, date]] | None = None) -> pd.DataFrame:
     """One row per fiscal quarter between the first review and `as_of`.
 
-    coverage_start: earliest date from which the review history is believed
-    complete (e.g. a scraper capped per product). Quarters starting before it
-    are flagged `partial_coverage`.
+    gaps: windows (start, end) with reviews known to be missing for at least one
+    product (see coverage_gaps). start=None means "from the beginning". A
+    quarter overlapping a gap is flagged `partial_coverage`, and a quarter whose
+    four-quarter baseline does is flagged `partial_baseline`; neither is usable.
     """
     if scored.empty:
         return pd.DataFrame()
@@ -94,24 +96,22 @@ def quarterly_measures(scored: pd.DataFrame, cal: FiscalCalendar, *, min_reviews
     # A baseline built on a sparse quarter is unreliable too.
     out["sparse_baseline"] = sparse.astype(float).shift(1).rolling(4, min_periods=1).max().fillna(1).astype(bool)
     out["in_progress"] = [q.end > as_of for q in quarters]
-    out["partial_coverage"] = [bool(coverage_start and q.start < coverage_start) for q in quarters]
+    out["partial_coverage"] = [any((gs is None or gs < q.end) and ge > q.start for gs, ge in gaps or [])
+                               for q in quarters]
+    out["partial_baseline"] = (out["partial_coverage"].astype(float).shift(1).rolling(4, min_periods=1).max()
+                               .fillna(0).astype(bool))
     out["usable"] = (out["AbnormalTone"].notna() & ~out["sparse"] & ~out["sparse_baseline"]
-                     & ~out["in_progress"] & ~out["partial_coverage"])
+                     & ~out["in_progress"] & ~out["partial_coverage"] & ~out["partial_baseline"])
     return out.reset_index()
 
 
-def coverage_start_from_log(coverage: pd.DataFrame) -> date | None:
-    """Latest 'oldest review' among products whose fetch hit the per-product cap.
-
-    If a product's reviews were truncated at the cap, history before its oldest
-    fetched review is missing, so quarters before that date are incomplete.
-    """
-    if coverage is None or coverage.empty or "hit_cap" not in coverage:
-        return None
-    capped = coverage[coverage["hit_cap"].astype(str).str.lower() == "true"]
-    if capped.empty:
-        return None
-    return pd.to_datetime(capped["oldest"]).max().date()
+def coverage_gaps(coverage: pd.DataFrame) -> list[tuple[date | None, date]]:
+    """Missing-review windows recorded by capped scraper fetches (coverage.csv)."""
+    if coverage is None or coverage.empty or "gap_end" not in coverage:
+        return []
+    g = coverage.dropna(subset=["gap_end"])
+    return [(None if pd.isna(r.gap_start) else pd.Timestamp(r.gap_start).date(), pd.Timestamp(r.gap_end).date())
+            for r in g.itertuples()]
 
 
 def history_status(quarterly: pd.DataFrame, target: int) -> dict[str, object]:
