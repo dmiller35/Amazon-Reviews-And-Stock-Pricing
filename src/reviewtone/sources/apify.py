@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -236,27 +237,46 @@ class ApifyReviews:
         self.actor, self.profile = resolve_profile(actor, config)
         self.log = log or AccessLog(None)
 
+    def _call(self, method: str, path: str, *, retries: int = 5, **kw) -> requests.Response:
+        """One short API call, retried on dropped connections and server errors."""
+        err = ""
+        for attempt in range(retries):
+            try:
+                resp = requests.request(method, f"{API}{path}", params={"token": self.token, **kw.pop("params", {})},
+                                        timeout=90, **kw)
+            except requests.RequestException as e:
+                err = f"{type(e).__name__}: {e}"
+            else:
+                if resp.status_code < 500 and resp.status_code != 429:
+                    return resp
+                err = f"HTTP {resp.status_code}"
+            time.sleep(min(60, 3 * 2 ** attempt))
+        raise SourceUnavailable(f"Apify unreachable after {retries} tries: {err}")
+
+    def run(self, payload: dict[str, Any], *, asin: str = "", timeout_s: int = 900) -> list[dict[str, Any]]:
+        """Start an actor run, wait for it with short polls, return its dataset items."""
+        resp = self._call("POST", f"/acts/{self.actor}/runs", json=payload)
+        if resp.status_code not in (200, 201):
+            raise SourceUnavailable(f"Apify actor {self.actor} returned HTTP {resp.status_code}: {resp.text[:300]}")
+        run = resp.json()["data"]
+        deadline = time.time() + timeout_s
+        while run["status"] in ("READY", "RUNNING") and time.time() < deadline:
+            run = self._call("GET", f"/actor-runs/{run['id']}", params={"waitForFinish": 60}).json()["data"]
+        self.log.record(source="apify", actor=self.actor, asin=asin, run=run["id"], status=run["status"])
+        if run["status"] != "SUCCEEDED":
+            # Readable products succeed even with zero reviews; a failed run means
+            # the actor could not read the product (delisted, merged or invalid).
+            raise ProductUnavailable(f"{asin}: actor run {run['status']} (product delisted or unreadable?)")
+        return self._call("GET", f"/datasets/{run['defaultDatasetId']}/items", params={"clean": "true"}).json()
+
     def fetch(self, asin: str, *, ticker: str, brand: str, max_reviews: int = 100, since: str | None = None,
               timeout_s: int = 900) -> FetchResult:
         """Newest reviews of one product. max_reviews applies per star filter for star-filtered actors."""
         if not self.token:
             raise SourceUnavailable("APIFY_TOKEN is not set; cannot run the Apify review scraper.")
-        url = f"{API}/acts/{self.actor}/run-sync-get-dataset-items"
         items: list[dict[str, Any]] = []
         for payload in self.profile.payloads(asin, max_reviews, since):
-            try:
-                resp = requests.post(url, params={"token": self.token, "timeout": timeout_s}, json=payload,
-                                     timeout=timeout_s + 60)
-            except requests.RequestException as e:
-                self.log.record(source="apify", actor=self.actor, asin=asin, status="error", error=str(e))
-                raise SourceUnavailable(f"Apify unreachable: {e}") from e
-            self.log.record(source="apify", actor=self.actor, asin=asin, status=resp.status_code,
-                            max_reviews=max_reviews)
-            if resp.status_code == 400 and "run-failed" in resp.text:
-                raise ProductUnavailable(f"{asin}: the actor could not read this product (delisted or invalid?)")
-            if resp.status_code not in (200, 201):
-                raise SourceUnavailable(f"Apify actor {self.actor} returned HTTP {resp.status_code}: {resp.text[:300]}")
-            items.extend(resp.json())
+            items.extend(self.run(payload, asin=asin, timeout_s=timeout_s))
         df, unmapped = normalize_items(items, ticker=ticker, brand=brand, fetched_at=utcnow())
         if len(df):
             df["asin"] = df["asin"].fillna(asin)

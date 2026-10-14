@@ -333,3 +333,39 @@ def test_resumable_download_survives_dropped_connection(monkeypatch):
     rows = list(mcauley.iter_jsonl("https://example.org/x.jsonl.gz"))
     assert [r["i"] for r in rows] == list(range(5000))
     assert len(calls) == 2 and calls[1] > 0
+
+
+def test_apify_run_polls_retries_and_flags_delisted(monkeypatch):
+    import requests as _rq
+
+    from reviewtone.sources import apify
+
+    monkeypatch.setattr(apify.time, "sleep", lambda s: None)
+    state = {"post": 0, "drops": 1}
+
+    class R:
+        def __init__(self, code, data):
+            self.status_code, self._d, self.text = code, data, ""
+
+        def json(self):
+            return self._d
+
+    def fake_request(method, url, params, timeout, **kw):
+        if state["drops"]:  # first call: connection reset, must be retried
+            state["drops"] -= 1
+            raise _rq.ConnectionError("Connection reset by peer")
+        if method == "POST":
+            state["post"] += 1
+            return R(201, {"data": {"id": f"run{state['post']}", "status": "RUNNING", "defaultDatasetId": "d"}})
+        if "/actor-runs/" in url:
+            ok = url.endswith("run1")
+            return R(200, {"data": {"id": url[-4:], "status": "SUCCEEDED" if ok else "FAILED", "defaultDatasetId": "d"}})
+        return R(200, [{"review_id": "x", "asin": "A", "rating": 4, "title": "t", "body": "b",
+                        "published_date": "2026-10-01"}])
+
+    monkeypatch.setattr(apify.requests, "request", fake_request)
+    monkeypatch.setenv("APIFY_TOKEN", "t")
+    client = apify.ApifyReviews(actor="junglee/amazon-reviews-scraper")
+    assert client.run({"x": 1}, asin="A")[0]["review_id"] == "x"
+    with pytest.raises(apify.ProductUnavailable):
+        client.run({"x": 1}, asin="DEAD")
