@@ -293,3 +293,43 @@ def test_real_actor_output_maps():
     assert (r.review_id, r.rating, r.text, r.review_date, r.verified) == (
         "amz-us-ca3f", 1.0, "detachable wands are impossible to remove", "2026-10-12", True)
     assert r.source == "apify:woot_amazon_us_reviews"
+
+def test_resumable_download_survives_dropped_connection(monkeypatch):
+    import gzip
+    import io as _io
+    import json as _json
+
+    from reviewtone.sources import mcauley
+
+    body = gzip.compress(("\n".join(_json.dumps({"i": i}) for i in range(5000)) + "\n").encode())
+    calls = []
+
+    class Raw:
+        def __init__(self, data, fail_after):
+            self.buf, self.fail_after, self.sent = _io.BytesIO(data), fail_after, 0
+
+        def readinto(self, b):
+            if self.fail_after is not None and self.sent >= self.fail_after:
+                raise ConnectionResetError(104, "Connection reset by peer")
+            n = self.buf.readinto(memoryview(b)[: min(len(b), 4096)])
+            self.sent += n
+            return n
+
+    class Resp:
+        def __init__(self, status, data, fail_after):
+            self.status_code, self.raw = status, Raw(data, fail_after)
+
+        def close(self):
+            pass
+
+    def fake_get(url, stream, timeout, headers):
+        start = int(headers["Range"].split("=")[1].rstrip("-")) if headers else 0
+        calls.append(start)
+        fail = len(body) // 3 if len(calls) == 1 else None  # first connection drops a third of the way in
+        return Resp(206 if start else 200, body[start:], fail)
+
+    monkeypatch.setattr(mcauley.requests, "get", fake_get)
+    monkeypatch.setattr(mcauley.time, "sleep", lambda s: None)
+    rows = list(mcauley.iter_jsonl("https://example.org/x.jsonl.gz"))
+    assert [r["i"] for r in rows] == list(range(5000))
+    assert len(calls) == 2 and calls[1] > 0

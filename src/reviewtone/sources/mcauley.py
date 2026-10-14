@@ -14,11 +14,13 @@ from __future__ import annotations
 import gzip
 import io
 import json
+import time
 from pathlib import Path
 from typing import Iterator
 
 import pandas as pd
 import requests
+import urllib3
 
 from ..config import Company
 from ..http import AccessLog, SourceUnavailable, utcnow
@@ -31,21 +33,64 @@ def category_urls(category: str) -> tuple[str, str]:
             f"{BASE_URL}/review_categories/{category}.jsonl.gz")
 
 
+class ResumableDownload(io.RawIOBase):
+    """A read-only HTTP body that reconnects where it left off.
+
+    The category files are several GB and take an hour or more to stream; a
+    dropped connection resumes with an HTTP Range request instead of
+    restarting (or failing) the backfill.
+    """
+
+    def __init__(self, url: str, log: AccessLog | None = None, retries: int = 20, timeout: float = 120):
+        self.url, self.log, self.retries, self.timeout = url, log, retries, timeout
+        self.pos = 0
+        self.resp = self._open()
+
+    def _open(self) -> requests.Response:
+        headers = {"Range": f"bytes={self.pos}-"} if self.pos else {}
+        for attempt in range(self.retries):
+            try:
+                resp = requests.get(self.url, stream=True, timeout=self.timeout, headers=headers)
+            except requests.RequestException as e:
+                err = str(e)
+            else:
+                if resp.status_code in (200, 206):
+                    if self.pos and resp.status_code != 206:
+                        raise SourceUnavailable(f"{self.url}: server cannot resume (no Range support)")
+                    if self.log:
+                        self.log.record(source="mcauley", url=self.url, status=resp.status_code, offset=self.pos)
+                    return resp
+                err = f"HTTP {resp.status_code}"
+                if resp.status_code in (403, 404):
+                    break
+            time.sleep(min(60, 2 ** attempt))
+        if self.log:
+            self.log.record(source="mcauley", url=self.url, status="error", error=err, offset=self.pos)
+        raise SourceUnavailable(f"{self.url}: {err}")
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buf) -> int:
+        for _ in range(self.retries):
+            try:
+                n = self.resp.raw.readinto(buf)
+                self.pos += n
+                return n
+            except (requests.RequestException, urllib3.exceptions.HTTPError, ConnectionError, OSError):
+                self.resp.close()
+                self.resp = self._open()  # resume at self.pos
+        raise SourceUnavailable(f"{self.url}: too many dropped connections")
+
+    def close(self) -> None:
+        self.resp.close()
+        super().close()
+
+
 def iter_jsonl(location: str | Path, log: AccessLog | None = None) -> Iterator[dict]:
     loc = str(location)
     if loc.startswith("http"):
-        try:
-            resp = requests.get(loc, stream=True, timeout=120)
-        except requests.RequestException as e:
-            if log:
-                log.record(source="mcauley", url=loc, status="error", error=str(e))
-            raise SourceUnavailable(f"{loc}: {e}") from e
-        if log:
-            log.record(source="mcauley", url=loc, status=resp.status_code)
-        if resp.status_code != 200:
-            raise SourceUnavailable(f"{loc}: HTTP {resp.status_code}")
-        resp.raw.decode_content = True
-        raw = resp.raw
+        raw = io.BufferedReader(ResumableDownload(loc, log), buffer_size=1 << 20)
         stream = gzip.GzipFile(fileobj=raw) if loc.endswith(".gz") else raw
         lines = io.TextIOWrapper(stream, encoding="utf-8")
     else:
