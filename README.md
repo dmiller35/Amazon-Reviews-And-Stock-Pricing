@@ -85,15 +85,17 @@ Limitations section and isn't papered over.
 
 ### History: live scraping vs. the McAuley dataset
 
-Live reviews from Apify are what the current prediction runs on. The default
-actor is [Axesso's Amazon Reviews Scraper](https://apify.com/axesso_data/amazon-reviews-scraper)
-(no Amazon login, pay per review). Amazon shows at most ~100 reviews per filter
-view, so the pipeline asks for each star rating separately: up to ~500 newest
-reviews per product, and the 1-2 star reviews the signal depends on are never
-crowded out by 5-star ones. `--max-reviews` is per star rating (max 100); the
-weekly update uses 30. Set `APIFY_REVIEWS_ACTOR=junglee~amazon-reviews-scraper` to
-use Junglee's actor instead, or add a profile for another actor in
-`sources/apify.py`. The catch is depth: popular products still only reach back
+Live reviews from Apify are what the current prediction runs on. The actor and its
+input format are set in `config/apify.yaml`, so you can switch actors without code
+changes. Pick a pay-per-result actor, not a monthly rental. The default is
+[stanvanrooy6's Amazon Reviews Scraper (US)](https://apify.com/stanvanrooy6/amazon-review-scraper-us):
+about $2 per 1,000 reviews, no Amazon login, up to ~1,000 reviews per product.
+Check its Input tab once and fix the field names in `config/apify.yaml` if they
+differ. `--max-reviews` is per product. Use something like 1000 on the first fetch
+(about $2 per product at most); the weekly update uses 30. Built-in profiles for
+Axesso (star-filtered) and Junglee remain: set `actor:` to
+`axesso_data~amazon-reviews-scraper` or `junglee~amazon-reviews-scraper` and
+remove `input:`. The catch is depth: popular products still only reach back
 weeks or months, and
 AbnormalTone needs the four quarters before the signal quarter as its baseline.
 When a fetch hits the per-product cap, any window between the reviews already
@@ -101,7 +103,7 @@ stored and the oldest one fetched is recorded as a gap in `coverage.csv`. Quarte
 that overlap a gap, or whose baseline does, are marked `partial_coverage` /
 `partial_baseline` and never used for calls. Fetches that overlap stored reviews,
 like a normal weekly update, leave no gap. So history grows forward on its own,
-and the first fetch already reaches as deep as Amazon allows.
+and a large `--max-reviews` on the first fetch reaches as far back as the actor can.
 For a multi-year backtest without waiting, use the
 McAuley Lab **Amazon Reviews 2023** dataset (reviews through Sep 2023; the paper used
 the same lab's earlier release):
@@ -170,7 +172,7 @@ alphas and the latest long/short list.
 config/study.yaml, config/companies/*.yaml   study settings, rules, universe
 src/reviewtone/
   fiscal.py            fiscal calendars (FY named by end year; 52/53-week matching)
-  sources/apify.py     Apify actor profiles (Axesso default), star-filtered fetches, truncation tracking
+  sources/apify.py     Apify client: actor from config/apify.yaml, input templates, truncation tracking
   sources/mcauley.py   Amazon Reviews 2023 streaming filter by storefront
   catalog.py reviews.py   products.csv; review schema, de-dup, append-only store
   tone/                rubric, Claude scorer, Naive Bayes (paper), lexicon (tests)

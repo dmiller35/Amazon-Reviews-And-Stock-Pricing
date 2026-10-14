@@ -220,10 +220,10 @@ def test_coverage_gaps_only_flag_missing_windows(study):
 
 
 def test_axesso_profile_star_filters_and_truncation():
-    from reviewtone.sources.apify import PROFILES, completeness
+    from reviewtone.sources.apify import BUILTIN, completeness
 
-    prof = PROFILES["axesso_data~amazon-reviews-scraper"]
-    inp = prof.build("B003NR57BY", 100)["input"]
+    prof = BUILTIN["axesso_data~amazon-reviews-scraper"]
+    inp = prof.payloads("B003NR57BY", 100)[0]["input"]
     assert [i["filterByStar"] for i in inp] == ["one_star", "two_star", "three_star", "four_star", "five_star"]
     assert all(i["maxPages"] == 10 and i["sortBy"] == "recent" and i["domainCode"] == "com" for i in inp)
     assert prof.cap(100) == 100 and prof.cap(30) == 30
@@ -243,3 +243,24 @@ def test_non_us_reviews_dropped_by_date_line():
               "date": "Reviewed in the United Kingdom on May 2, 2026"}]
     df, _ = normalize_items(items, ticker="LOGI", brand="Logitech", fetched_at="now")
     assert df["review_id"].tolist() == ["a"]
+
+
+def test_configured_actor_template(tmp_path, monkeypatch):
+    from reviewtone.sources.apify import CONFIG, resolve_profile
+
+    monkeypatch.delenv("APIFY_REVIEWS_ACTOR", raising=False)
+    name, prof = resolve_profile(config=CONFIG)  # the shipped config parses
+    assert name == "stanvanrooy6~amazon-review-scraper-us" and not prof.by_star
+    assert prof.payloads("B0TEST", 300) == [{"products": ["B0TEST"], "maxReviewsPerProduct": 300, "mode": "expanded"}]
+    assert prof.cap(300) == 300
+
+    cfg = tmp_path / "apify.yaml"
+    cfg.write_text("actor: someone/cheap-reviews\nby_star: true\nstar_values: [1, 5]\ncap: 100\n"
+                   "input: {asin: '{asin}', stars: ['{star}'], limit: '{max}', note: 'asin {asin}'}\n")
+    name, prof = resolve_profile(config=cfg)
+    assert name == "someone~cheap-reviews"
+    assert prof.payloads("A1", 50) == [{"asin": "A1", "stars": [1], "limit": 50, "note": "asin A1"},
+                                       {"asin": "A1", "stars": [5], "limit": 50, "note": "asin A1"}]
+    assert resolve_profile("junglee/amazon-reviews-scraper", cfg)[0] == "junglee~amazon-reviews-scraper"
+    with pytest.raises(ValueError):
+        resolve_profile("unknown/actor", cfg)
