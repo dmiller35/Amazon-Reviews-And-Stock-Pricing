@@ -76,7 +76,7 @@ Then `source .venv/bin/activate` and:
 
 ```bash
 reviewtone backfill --all          # 1. history 2018-Sep 2023: products.csv + reviews.csv for every company
-                                   #    (streams ~36 GB once; 30-90 min depending on bandwidth; free)
+                                   #    (streams ~42 GB once, resuming if the connection drops; 1-2 hours; free)
 reviewtone fetch --ticker LOGI --source apify                      # 2. recent reviews (Apify, paid: up
                                    #    to 10 products x 5 stars x 100 = 5,000 reviews, at most $9)
 reviewtone score --ticker LOGI --sample 200                        # 3. try Claude on 200 reviews, check cost
