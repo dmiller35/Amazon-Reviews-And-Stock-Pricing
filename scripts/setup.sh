@@ -18,10 +18,27 @@ for cand in python3.13 python3.12 python3.11 python3.10 python3; do
 done
 [ -n "$PY" ] || { echo "Python 3.10+ is required: https://www.python.org/downloads/"; exit 1; }
 
+# pandas/scipy/scikit-learn need memory to install, and backfill needs more to run.
+mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+swap_mb=$(awk '/SwapTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+if [ "$mem_mb" -gt 0 ] && [ $((mem_mb + swap_mb)) -lt 3500 ]; then
+  echo "WARNING: only ${mem_mb} MB RAM + ${swap_mb} MB swap. Installs can crash ('Aborted') and"
+  echo "backfill needs more. On WSL, create C:\\Users\\<you>\\.wslconfig with"
+  echo "  [wsl2]"; echo "  memory=8GB"; echo "  swap=8GB"
+  echo "then run 'wsl --shutdown' in PowerShell and reopen Ubuntu."
+fi
+
 say "Installing into .venv with $($PY --version)"
 [ -d .venv ] || "$PY" -m venv .venv
-.venv/bin/python -m pip install --quiet --upgrade pip
-.venv/bin/python -m pip install --quiet -e '.[dev]'
+.venv/bin/python -m pip install --progress-bar off --upgrade pip | tail -1
+if .venv/bin/python -m pip install --progress-bar off -e '.[dev]' > .venv/install.log 2>&1; then
+  grep -E "^Successfully installed" .venv/install.log || echo "All packages already installed."
+else
+  tail -15 .venv/install.log
+  echo "Install failed (full log: .venv/install.log). 'Aborted' or 'Killed' means the machine ran out"
+  echo "of memory: see the warning above, then re-run: bash scripts/setup.sh"
+  exit 1
+fi
 
 if [ ! -f .env ]; then
   say "API keys (input is hidden; saved to .env)"
