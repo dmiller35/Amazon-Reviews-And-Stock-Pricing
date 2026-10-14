@@ -43,7 +43,8 @@ FIELD_CANDIDATES = {
 
 # Fields actors return that are understood but not stored.
 IGNORED_FIELDS = {"amazon_review_id", "id_type", "marketplace", "published_date_raw", "date_status", "author",
-                  "helpful_votes", "images", "videos", "product_url", "scraped_at", "schema_version", "vine_review"}
+                  "helpful_votes", "images", "videos", "product_url", "scraped_at", "schema_version", "vine_review",
+                  "data", "helpful_count", "image_url", "vine"}
 
 _RATING_RE = re.compile(r"(\d(?:\.\d)?)")
 _DATE_RE = re.compile(r"on\s+(.+)$")
@@ -115,7 +116,8 @@ def normalize_items(items: list[dict[str, Any]], *, ticker: str, brand: str, fet
             "source_url": _first(it, FIELD_CANDIDATES["source_url"]),
             "fetched_at": fetched_at,
         })
-    return pd.DataFrame(rows), sorted(seen_keys - known)
+    from ..reviews import REVIEW_COLUMNS
+    return pd.DataFrame(rows, columns=REVIEW_COLUMNS), sorted(seen_keys - known)
 
 
 STARS = {1: "one_star", 2: "two_star", 3: "three_star", 4: "four_star", 5: "five_star"}
@@ -186,18 +188,30 @@ def template_profile(cfg: dict[str, Any]) -> Profile:
     stars = cfg.get("star_values", [1, 2, 3, 4, 5])
     limit = int(cfg.get("max_per_request", 10**9))
 
-    def payloads(asin: str, m: int, since: str | None = None) -> list[dict[str, Any]]:
-        values = {"asin": asin, "max": min(m, limit), "since": since}
+    def payloads(asin: str, m: int | dict[int, int], since: str | None = None) -> list[dict[str, Any]]:
+        # m: one limit for every request, or {star (1-5): limit} when split by star
+        per = (lambda i: min(m.get(i, max(m.values())), limit)) if isinstance(m, dict) else (lambda i: min(m, limit))
         if split:
-            return [fill(tmpl, {**values, "star": s}) for s in stars]
-        return [fill(tmpl, values)]
+            return [fill(tmpl, {"asin": asin, "max": per(i + 1), "since": since, "star": s})
+                    for i, s in enumerate(stars)]
+        return [fill(tmpl, {"asin": asin, "max": per(0), "since": since})]
 
     cap = cfg.get("cap", "{max}")
-    return Profile(payloads, lambda m: int(fill(cap, {"max": min(m, limit)})), by_star)
+
+    def cap_for(m: int | dict[int, int]) -> int | dict[int, int]:
+        if isinstance(m, dict):
+            return {k: int(fill(cap, {"max": min(v, limit)})) for k, v in m.items()}
+        return int(fill(cap, {"max": min(m, limit)}))
+
+    return Profile(payloads, cap_for, by_star)
+
+
+def load_config(config: Path = CONFIG) -> dict[str, Any]:
+    return yaml.safe_load(config.read_text()) if config.exists() else {}
 
 
 def resolve_profile(actor: str | None = None, config: Path = CONFIG) -> tuple[str, Profile]:
-    cfg = yaml.safe_load(config.read_text()) if config.exists() else {}
+    cfg = load_config(config)
     name = (actor or os.environ.get("APIFY_REVIEWS_ACTOR") or cfg.get("actor") or "").replace("/", "~")
     if not name:
         raise ValueError(f"No Apify actor configured; set `actor` in {config}.")
@@ -219,14 +233,15 @@ class FetchResult:
     complete_from: str | None  # reviews are complete from this date on; None = full history returned
 
 
-def completeness(df: pd.DataFrame, cap: int, by_star: bool) -> tuple[bool, str | None]:
+def completeness(df: pd.DataFrame, cap: int | dict[int, int], by_star: bool) -> tuple[bool, str | None]:
     """Find where truncation starts. With star filters, each star's list is
     complete back to its own oldest review unless it hit the cap; the set as a
     whole is complete from the latest of those truncation points."""
     if df.empty:
         return False, None
     groups = df.groupby(df["rating"].round()) if by_star else [(None, df)]
-    cut = [g["review_date"].min() for _, g in groups if len(g) >= cap]
+    limit = (lambda star: cap.get(int(star), 10**9)) if isinstance(cap, dict) else (lambda star: cap)
+    cut = [g["review_date"].min() for star, g in groups if len(g) >= limit(star)]
     return bool(cut), max(cut) if cut else None
 
 
@@ -269,8 +284,18 @@ class ApifyReviews:
             raise ProductUnavailable(f"{asin}: actor run {run['status']} (product delisted or unreadable?)")
         return self._call("GET", f"/datasets/{run['defaultDatasetId']}/items", params={"clean": "true"}).json()
 
-    def fetch(self, asin: str, *, ticker: str, brand: str, max_reviews: int = 100, since: str | None = None,
-              timeout_s: int = 900) -> FetchResult:
+    def newest_review(self, asin: str) -> str | None:
+        """Date of the product's newest review, from a few-review request (cheap).
+
+        Uses the last configured star filter (5 stars: the most frequent) so it
+        costs at most 3 reviews.
+        """
+        items = self.run(self.profile.payloads(asin, 3, None)[-1], asin=asin)
+        df, _ = normalize_items(items, ticker="", brand="", fetched_at="")
+        return df["review_date"].max() if len(df) else None
+
+    def fetch(self, asin: str, *, ticker: str, brand: str, max_reviews: int | dict[int, int] = 100,
+              since: str | None = None, timeout_s: int = 900) -> FetchResult:
         """Newest reviews of one product. max_reviews applies per star filter for star-filtered actors."""
         if not self.token:
             raise SourceUnavailable("APIFY_TOKEN is not set; cannot run the Apify review scraper.")
@@ -287,3 +312,24 @@ class ApifyReviews:
         if unmapped:
             self.log.record(source="apify", kind="unmapped_fields", fields=unmapped)
         return FetchResult(df, hit_cap, complete_from)
+
+
+def preflight(client: ApifyReviews, as_of: Any, config: Path = CONFIG) -> str:
+    """Fail fast if the actor returns nothing recent for a known-active product.
+
+    Some actors end "successfully" with zero results when the account's plan
+    doesn't allow them; without this check every product would look dead.
+    """
+    cfg = load_config(config)
+    asin = cfg.get("check_asin")
+    if not asin:
+        return "skipped"
+    window = int(cfg.get("live_window_days", 120))
+    latest = client.newest_review(asin)
+    cutoff = (pd.Timestamp(as_of) - pd.Timedelta(days=window)).strftime("%Y-%m-%d")
+    if not latest or latest < cutoff:
+        raise SourceUnavailable(
+            f"Preflight failed: actor {client.actor} returned no recent reviews for check_asin {asin} "
+            f"(newest: {latest}). The actor may need a paid Apify plan, its input format may have changed, "
+            "or check_asin is no longer sold. See config/apify.yaml.")
+    return latest

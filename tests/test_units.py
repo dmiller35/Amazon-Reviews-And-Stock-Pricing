@@ -259,13 +259,12 @@ def test_configured_actor_template(tmp_path, monkeypatch):
 
     monkeypatch.delenv("APIFY_REVIEWS_ACTOR", raising=False)
     name, prof = resolve_profile(config=CONFIG)  # the shipped config parses
-    assert name == "stanvanrooy6~amazon-review-scraper-us" and prof.by_star
-    runs = prof.payloads("B0TEST", 300, "2026-09-01")
-    assert len(runs) == 5 and [r["ratings"] for r in runs] == [[1], [2], [3], [4], [5]]
-    assert runs[0] == {"products": ["B0TEST"], "mode": "recent", "ratings": [1], "maxReviewsPerProduct": 100,
-                       "dateFrom": "2026-09-01", "includePhotoVideoReviews": False, "failOnPartial": False}
-    assert "dateFrom" not in prof.payloads("B0TEST", 30, None)[0]   # nothing stored yet: no date filter
-    assert prof.cap(300) == 100 and prof.cap(30) == 30
+    assert name == "jdtpnjtp~amazon-reviews" and prof.by_star
+    runs = prof.payloads("B0TEST", 100, "2026-09-01")
+    assert [r["starFilter"] for r in runs] == ["one_star", "two_star", "three_star", "four_star", "five_star"]
+    assert runs[0] == {"products": ["B0TEST"], "country": "us", "sort": "recent", "starFilter": "one_star",
+                       "maxReviewsPerAsin": 100, "includeTopReviewsFallback": False, "stopOnError": False}
+    assert prof.cap(100) == 100
 
     cfg = tmp_path / "apify.yaml"
     cfg.write_text("actor: someone/cheap-reviews\nsplit_by_star: false\ncap: 100\n"
@@ -276,6 +275,29 @@ def test_configured_actor_template(tmp_path, monkeypatch):
     assert resolve_profile("junglee/amazon-reviews-scraper", cfg)[0] == "junglee~amazon-reviews-scraper"
     with pytest.raises(ValueError):
         resolve_profile("unknown/actor", cfg)
+
+
+def test_jdtpnjtp_output_maps():
+    item = {"asin": "B07SGPJBZ6", "author": "x", "rating": "1", "title": "Lid leaks", "text": "Leaks every time",
+            "date": "October 10, 2026", "country": "the United States", "verified_purchase": "True", "vine": "False",
+            "helpful_count": "0", "images": "[]", "image_url": "None", "data": "{}"}
+    df, unmapped = normalize_items([item], ticker="YETI", brand="YETI", fetched_at="now")
+    assert unmapped == [] and df.loc[0, "review_date"] == "2026-10-10" and df.loc[0, "rating"] == 1.0
+    uk = dict(item, country="the United Kingdom")
+    assert normalize_items([uk], ticker="YETI", brand="YETI", fetched_at="")[0].empty
+
+
+def test_preflight_stops_on_silent_empty_actor(monkeypatch):
+    from reviewtone.sources import apify
+
+    monkeypatch.setenv("APIFY_TOKEN", "t")
+    client = apify.ApifyReviews()
+    monkeypatch.setattr(client, "run", lambda payload, **kw: [])  # paid-only actor: "succeeds" with nothing
+    with pytest.raises(apify.SourceUnavailable, match="Preflight failed"):
+        apify.preflight(client, "2026-10-14")
+    monkeypatch.setattr(client, "run", lambda payload, **kw: [{"asin": "A", "rating": 5, "title": "t", "text": "x",
+                                                               "date": "October 10, 2026"}])
+    assert apify.preflight(client, "2026-10-14") == "2026-10-10"
 
 
 def test_real_actor_output_maps():
@@ -293,6 +315,8 @@ def test_real_actor_output_maps():
     assert (r.review_id, r.rating, r.text, r.review_date, r.verified) == (
         "amz-us-ca3f", 1.0, "detachable wands are impossible to remove", "2026-10-12", True)
     assert r.source == "apify:woot_amazon_us_reviews"
+    empty, _ = normalize_items([], ticker="SN", brand="Ninja", fetched_at="now")  # no reviews: still has columns
+    assert empty.empty and {"asin", "parent_asin", "review_date"} <= set(empty.columns)
 
 def test_resumable_download_survives_dropped_connection(monkeypatch):
     import gzip
@@ -369,3 +393,31 @@ def test_apify_run_polls_retries_and_flags_delisted(monkeypatch):
     assert client.run({"x": 1}, asin="A")[0]["review_id"] == "x"
     with pytest.raises(apify.ProductUnavailable):
         client.run({"x": 1}, asin="DEAD")
+
+
+def test_request_sizes_follow_review_rate(study):
+    from reviewtone.pipeline import Run
+    from reviewtone.sources.apify import BUILTIN, completeness, resolve_profile
+
+    run = Run(study, study.company("YETI"), as_of=date(2026, 10, 14))
+    days = pd.date_range("2026-04-16", "2026-10-06", freq="D")  # ~2 five-star a day, 1 one-star a week
+    rows = [{"rating": 5, "review_date": d.strftime("%Y-%m-%d")} for d in days for _ in range(2)]
+    rows += [{"rating": 1, "review_date": d.strftime("%Y-%m-%d")} for d in days[::7]]
+    mine = pd.DataFrame(rows).assign(source="apify:x", fetched_at="2026-10-07T06:00:00Z")
+    sizes = run._request_sizes(mine, 100)
+    assert 25 <= sizes[5] <= 35       # ~9 days x 2/day x 1.5 + margin
+    assert sizes[1] == 5 and sizes[3] == 5   # rare stars: minimum request
+    assert run._request_sizes(mine.iloc[0:0], 100) == 100  # first live fetch: full depth
+    # a truncated list (20 five-star reviews in the last 5 days) must read as ~4/day, not 20/180
+    busy = pd.DataFrame({"rating": [5] * 20 + [1] * 20,
+                         "review_date": [f"2026-10-0{3 + i % 5}" for i in range(20)]
+                         + pd.date_range("2025-01-01", periods=20, freq="20D").strftime("%Y-%m-%d").tolist()})
+    busy = busy.assign(source="apify:x", fetched_at="2026-10-07T06:00:00Z")
+    assert run._request_sizes(busy, 100)[5] >= 40
+
+    _, prof = resolve_profile()
+    reqs = prof.payloads("A", sizes)
+    assert [r["maxReviewsPerAsin"] for r in reqs] == [sizes[i] for i in range(1, 6)]
+    full5 = pd.DataFrame({"rating": [5.0] * sizes[5], "review_date": ["2026-10-08"] * sizes[5]})
+    assert completeness(full5, prof.cap(sizes), by_star=True) == (True, "2026-10-08")  # filled list -> truncated
+    assert BUILTIN["junglee~amazon-reviews-scraper"].cap(50) == 50

@@ -109,10 +109,16 @@ class Run:
                 except SourceUnavailable as e:
                     errors.append(str(e))
         elif source == "apify":
-            from .sources.apify import ApifyReviews, ProductUnavailable
+            from .sources.apify import ApifyReviews, ProductUnavailable, load_config, preflight
             client = ApifyReviews(log=self.log)
-            stored = rv.load(self.dir / "reviews.csv")
             want = top_products or self.study.raw.get("apify", {}).get("top_products", 20)
+            try:
+                preflight(client, self.as_of)
+            except SourceUnavailable as e:
+                errors.append(str(e))
+                want = 0  # don't mark products dead because the scraper itself is broken
+            window = int(load_config().get("live_window_days", 120))
+            stored = rv.load(self.dir / "reviews.csv")
             live = 0
             # Walk down the ranking: products Amazon no longer sells are marked
             # dead and replaced by the next most-reviewed, so every tracked
@@ -123,9 +129,17 @@ class Run:
                 mine = stored[(stored["asin"] == p.asin) | (stored["parent_asin"] == p.asin)]
                 newest = mine["review_date"].max() if len(mine) else None
                 since = (pd.Timestamp(newest) - pd.Timedelta(days=7)).strftime("%Y-%m-%d") if newest else None
+                cutoff = (pd.Timestamp(self.as_of) - pd.Timedelta(days=window)).strftime("%Y-%m-%d")
                 try:
+                    if not (newest and newest >= cutoff):
+                        # Cheap check before paying for a full fetch: is this
+                        # listing still collecting reviews?
+                        latest = client.newest_review(p.asin)
+                        if not latest or latest < cutoff:
+                            raise ProductUnavailable(f"{p.asin}: no reviews since {cutoff} (newest {latest}); "
+                                                     "listing retired or reviews moved to a newer one")
                     res = client.fetch(p.asin, ticker=self.company.ticker, brand=p.brand,
-                                       max_reviews=max_reviews_per_product, since=since)
+                                       max_reviews=self._request_sizes(mine, max_reviews_per_product), since=since)
                 except ProductUnavailable as e:
                     products.loc[products["asin"] == p.asin, ["live", "live_checked_at"]] = [False, utcnow()]
                     errors.append(str(e))
@@ -150,6 +164,33 @@ class Run:
         self.note(f"fetch_{source}", fetched=len(new), added=len(added), errors=errors[:10],
                   n_errors=len(errors), **({"error": errors[0]} if errors and not len(new) else {}))
         return len(added)
+
+    def _request_sizes(self, mine: pd.DataFrame, cap: int) -> int | dict[int, int]:
+        """Per-star request sizes for a product already followed live.
+
+        The scraper has no date filter, so each run pays for the newest N reviews
+        per star even if they are already stored. Sizing N to the product's own
+        recent review rate (1.5x the expected new reviews since the last fetch,
+        plus a margin) keeps weekly cost close to the number of truly new reviews,
+        while a list that still fills up is recorded as truncated, never hidden.
+        """
+        live = mine[mine["source"].astype(str).str.startswith("apify")]
+        if live.empty:
+            return cap  # first live fetch: go as deep as allowed
+        dates = pd.to_datetime(live["review_date"])
+        stars = pd.to_numeric(live["rating"], errors="coerce").round()
+        last = pd.to_datetime(live["fetched_at"], errors="coerce", utc=True).max()
+        last = last.tz_localize(None) if pd.notna(last) else dates.max()
+        days = max(1, (pd.Timestamp(self.as_of) - last).days + 2)
+        window = dates >= dates.max() - pd.Timedelta(days=180)
+        sizes = {}
+        for star in range(1, 6):
+            d = dates[window & (stars == star)]
+            # Rate over this star's own span: a list truncated at N reviews covers
+            # a short span, so N / span is the true rate, not N / 180 days.
+            rate = len(d) / max(2, (dates.max() - d.min()).days) if len(d) else 0.0
+            sizes[star] = int(min(cap, max(5, -(-rate * days * 1.5 // 1) + 3)))
+        return sizes
 
     def tracked_products(self, products: pd.DataFrame | None = None, top: int | None = None) -> pd.DataFrame:
         """The products followed live: hand-seeded ASINs, then the most-reviewed.

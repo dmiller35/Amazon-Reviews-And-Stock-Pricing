@@ -78,7 +78,7 @@ Then `source .venv/bin/activate` and:
 reviewtone backfill --all          # 1. history 2018-Sep 2023: products.csv + reviews.csv for every company
                                    #    (streams ~36 GB once; 30-90 min depending on bandwidth; free)
 reviewtone fetch --ticker LOGI --source apify                      # 2. recent reviews (Apify, paid: up
-                                   #    to 20 products x 5 stars x 100 = 10,000 reviews, at most $20)
+                                   #    to 10 products x 5 stars x 100 = 5,000 reviews, at most $9)
 reviewtone score --ticker LOGI --sample 200                        # 3. try Claude on 200 reviews, check cost
 reviewtone run --ticker LOGI --scorer naive_bayes                  # 4. score the rest cheaply, then
                                    #    quarters, charts, SEC join, held-out eval, prediction, report
@@ -96,7 +96,7 @@ the report's Limitations section and isn't papered over.
 thresholds, companies and how many products to follow before you run it.
 
 Tone is measured on the **tracked products**: the ones followed live, i.e. each
-company's 20 most-reviewed plus any in `seed_asins.csv`. That applies to every
+company's 10 most-reviewed live products plus any in `seed_asins.csv`. That applies to every
 quarter, historical and live, so AbnormalTone compares like with like when the
 data switches from the historical dataset to the scraper. The historical
 dataset ends in September 2023; until live data arrives, quarters from that
@@ -106,28 +106,38 @@ date on are marked as a coverage gap.
 
 Live reviews from Apify are what the current prediction runs on. The actor and its
 input format are set in `config/apify.yaml`, so you can switch actors without code
-changes; pick a pay-per-result actor, not a monthly rental. The default,
-[stanvanrooy6's Amazon Reviews Scraper (US)](https://apify.com/stanvanrooy6/amazon-review-scraper-us),
-was tested live on 2026-10-14: $0.002 per review delivered, no monthly fee, no
-Amazon login. It reads Amazon US reviews through Woot (owned by Amazon), so each
-review keeps its origin in the `source` column.
+changes. Five actors were tested live on 2026-10-14 from a free Apify account:
+
+| Actor | Result |
+|---|---|
+| **jdtpnjtp/amazon-reviews** (default) | Works: reads Amazon directly, no login, $0.0018 per review, newest first, past Amazon's 100-per-filter limit |
+| stanvanrooy6/amazon-review-scraper-us | Reads a Woot mirror: months stale or empty for many best-sellers |
+| axesso_data/amazon-reviews-scraper | "Usage only allowed for paying user" (finishes with zero results) |
+| web_wanderer/amazon-reviews-extractor | US full-text reviews need a login; returned nothing |
+| junglee/amazon-reviews-scraper | Works, but about $6 per 1,000 reviews on the free tier |
 
 How it is used:
-- **Each star rating is a separate run.** "Newest" mode returns up to 100 reviews
-  per star, so a product yields up to 500. This also fits Apify's free plan, which
-  caps a run at 100 results. `--max-reviews` is per star (max 100).
-- **Only new reviews are paid for.** Each run asks only for reviews from a week
-  before the newest stored one (`dateFrom`).
-- **Only each company's 20 most-reviewed products are followed live**
-  (`apify.top_products`). Products Amazon no longer sells are detected, marked
-  `live=False` in `products.csv`, and replaced by the next most-reviewed. Every
-  tracked product therefore has both historical and current reviews.
+- **Each star rating is a separate request.** Asking for all stars at once silently
+  skipped 1-star reviews in testing, and negative reviews are the signal.
+- **A preflight check runs before every live fetch.** It fetches a known-active
+  product (`check_asin`) and stops the run if nothing recent comes back, so a
+  broken or paid-only scraper can't silently store empty results.
+- **Products must still be collecting reviews.** Amazon moves reviews to newer
+  listings, so a few-review probe checks each candidate's newest review. Listings
+  with nothing in the last 120 days are marked `live=False` and replaced by the
+  next most-reviewed product. Every tracked product therefore has both historical
+  and current reviews.
+- **Weekly requests follow each product's review rate.** This actor has no date
+  filter, so every run pays for the newest N reviews per star. N is sized to
+  about 1.5× the reviews expected since the last fetch: about 40 five-star
+  reviews for a busy tumbler, 5 for a quiet star.
+- **Only each company's 10 most-reviewed live products are followed**
+  (`apify.top_products`).
 
-Rough cost: the first fetch is at most 16 companies × 20 products × 500 reviews ×
-$0.002, about $320 if every list were full (most aren't). After that, weekly
-updates pay only for new reviews: a few dollars a week. Built-in profiles for
-Axesso and Junglee remain: set `actor:` to `axesso_data~amazon-reviews-scraper`
-or `junglee~amazon-reviews-scraper` and remove `input:`.
+Rough cost with 16 companies × 10 products: the first fetch is at most 5 stars ×
+100 reviews × $0.0018 per product (about $144 in total, usually less), then about
+$10–15 a week. Apify's free plan includes only a small monthly credit; check your
+Apify billing page and set a spending limit.
 
 The catch is depth: popular products still only reach back weeks or months, and
 AbnormalTone needs the four quarters before the signal quarter as its baseline.

@@ -1,31 +1,44 @@
 # Which Apify actor collects live Amazon reviews, and how to call it.
 #
-# Pick a PAY-PER-RESULT actor (no monthly rental) and make `input` match its
-# Input tab exactly. Placeholders, filled per request:
+# Pick a PAY-PER-RESULT actor that works on your Apify plan, and make `input`
+# match its Input tab. Placeholders, filled per request:
 #   {asin}  product ASIN       {max}  max reviews per request
 #   {star}  one star rating, when split_by_star is true (one run per value)
-#   {since} newest stored review date minus a week; a key whose value is just
-#           "{since}" is left out when nothing is stored yet
+#   {since} newest stored review date minus a week (drop the key if the actor
+#           has no date filter; a key whose value is just "{since}" is omitted
+#           when nothing is stored yet)
 # The APIFY_REVIEWS_ACTOR environment variable overrides `actor`. Built-in
-# profiles also exist for axesso_data~amazon-reviews-scraper and
-# junglee~amazon-reviews-scraper: set `actor` to one of them and delete `input`.
-
-# stanvanrooy6 "Amazon Reviews Scraper (US)": $0.002 per review delivered, no
-# monthly fee, no Amazon login. It reads Amazon US reviews through Woot (owned
-# by Amazon). Verified live on 2026-10-14. "recent" mode returns up to 100 of the
-# newest reviews per star rating, so each star is requested separately (this
-# also fits Apify's free plan, which caps a run at 100 results).
-actor: stanvanrooy6~amazon-review-scraper-us
+# profiles exist for axesso_data~amazon-reviews-scraper (needs a paid Apify
+# plan) and junglee~amazon-reviews-scraper: set `actor` and delete `input`.
+#
+# Tested live on 2026-10-14 (Apify free plan):
+#   jdtpnjtp~amazon-reviews             works: reads Amazon directly, no login,
+#                                       $0.0018/review, newest first, goes past
+#                                       Amazon's 100-per-filter limit. Asking for
+#                                       "all stars" silently skipped 1-star
+#                                       reviews, so stars are requested one by one.
+#   stanvanrooy6~amazon-review-scraper-us  reads a Woot mirror: months stale or
+#                                       empty for many best-sellers.
+#   axesso_data~amazon-reviews-scraper  "usage only allowed for paying user".
+#   web_wanderer~amazon-reviews-extractor  US full-text reviews need a login.
+actor: jdtpnjtp~amazon-reviews
 split_by_star: true
-star_values: [1, 2, 3, 4, 5]
+star_values: [one_star, two_star, three_star, four_star, five_star]
 by_star: true            # judge truncation per star list
-max_per_request: 100     # the actor's per-star limit in "recent" mode
 cap: "{max}"
 input:
   products: ["{asin}"]
-  mode: recent
-  ratings: ["{star}"]
-  maxReviewsPerProduct: "{max}"
-  dateFrom: "{since}"
-  includePhotoVideoReviews: false
-  failOnPartial: false
+  country: us
+  sort: recent
+  starFilter: "{star}"
+  maxReviewsPerAsin: "{max}"
+  includeTopReviewsFallback: false
+  stopOnError: false
+
+# A product counts as live only if its newest review is this recent. Amazon
+# moves reviews to newer listings, and old listings stop collecting them.
+live_window_days: 120
+# Known-active product used by the preflight check before every live fetch: if
+# the actor returns nothing recent for it, the run stops instead of silently
+# storing empty results (a paid-only actor "succeeds" with zero reviews).
+check_asin: B07SGPJBZ6   # YETI Rambler 20 oz tumbler

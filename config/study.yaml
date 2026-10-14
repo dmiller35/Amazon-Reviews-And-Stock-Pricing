@@ -34,9 +34,12 @@ tone:
 
 apify:
   # Live scraping is paid per review, so only each company's N most-reviewed
-  # products (plus any in seed_asins.csv) are scraped. Cost per run is roughly
-  # companies x top_products x max_reviews x ~$0.002.
-  top_products: 20
+  # products that are still collecting reviews (plus any in seed_asins.csv)
+  # are scraped, and tone is measured on exactly those products. First fetch:
+  # at most companies x N x 5 stars x 100 reviews x $0.0018 (16 x 10 -> ~$144,
+  # usually less). Weekly updates are sized to each product's review rate:
+  # roughly $10-15/week for 16 x 10.
+  top_products: 10
 
 aggregation:
   # A fiscal quarter with fewer product-opinion reviews than this is flagged sparse
