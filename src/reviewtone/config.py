@@ -26,6 +26,7 @@ class Company:
     fiscal_year_end: str  # "MM-DD"
     brands: tuple[Brand, ...]
     source_file: str = ""
+    mcauley_categories: tuple[str, ...] = ()  # data sourcing only; not part of the fingerprint
 
     def fingerprint(self) -> str:
         """Hash of the definition; registered companies may not change."""
@@ -124,6 +125,7 @@ def company_from_dict(c: dict[str, Any], source_file: str = "") -> Company:
             for b in c["brands"]
         ),
         source_file=source_file,
+        mcauley_categories=tuple(c.get("mcauley_categories") or ()),
     )
 
 
@@ -142,7 +144,7 @@ def load_study(path: str | Path | None = None) -> Study:
 
 
 def write_company(study: Study, ticker: str, name: str, fiscal_year_end: str,
-                  brands: dict[str, list[str]]) -> Path:
+                  brands: dict[str, list[str]], categories: list[str] | None = None) -> Path:
     """Create config/companies/<TICKER>.yaml. Refuses to overwrite."""
     ticker = ticker.upper()
     if ticker in study.tickers:
@@ -151,10 +153,12 @@ def write_company(study: Study, ticker: str, name: str, fiscal_year_end: str,
     if not (1 <= month <= 12 and 1 <= day <= 31):
         raise ValueError("fiscal year end must be MM-DD, e.g. 03-31")
     doc = {"ticker": ticker, "name": name, "fiscal_year_end": f"{month:02d}-{day:02d}",
-           "brands": [{"name": b, "amazon_store_names": stores or [b]} for b, stores in brands.items()]}
+           "brands": [{"name": b, "amazon_store_names": stores or [b]} for b, stores in brands.items()],
+           "mcauley_categories": list(categories or [])}
     study.companies_dir.mkdir(parents=True, exist_ok=True)
     path = study.companies_dir / f"{ticker}.yaml"
     path.write_text("# One file per company. Add more with `reviewtone add-company`.\n"
-                    "# amazon_store_names: the exact `store` / brand-storefront names on Amazon US.\n"
+                    "# amazon_store_names: exact Amazon `store` names (matched case-insensitively).\n"
+                    "# mcauley_categories: Amazon Reviews 2023 categories searched by `reviewtone backfill`.\n"
                     + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
     return path

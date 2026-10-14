@@ -18,7 +18,8 @@ anticipate a company's revenue and its stock's reaction to earnings. It implemen
 
 ## How the predictor works
 
-1. **Signal.** Every review is scored for tone from −2 to +2 by Claude, using a
+1. **Signal.** Every review is scored for tone from −2 to +2 by Claude (Haiku 5.5 by
+   default; `claude_model` in `config/study.yaml`), using a
    fixed rubric (`src/reviewtone/tone/rubric.py`). The star rating is hidden from
    the scorer, so tone is measured separately from rating, as in the paper. Claude
    also tags reasons (defect, quality decline, durability, price…) and flags
@@ -52,36 +53,46 @@ anticipate a company's revenue and its stock's reaction to earnings. It implemen
 | No I/B/E/S consensus, so no earnings-surprise regression | Not freely available. The announcement return captures the market's surprise instead. |
 | Per-company pre-registration lock | Companies can be added at any time, but once a company has results it can't be edited or dropped, and the rules can't change. That enforces "never select companies after results". |
 
-## Setup
+## Setup (your computer, one command)
+
+macOS or Linux (on Windows, use WSL). You need Python 3.10+ and git.
 
 ```bash
-pip install -e '.[dev]'
-export ANTHROPIC_API_KEY=...                 # tone scoring
-export APIFY_TOKEN=...                       # live Amazon reviews
-export SEC_USER_AGENT="Your Name you@example.com"   # SEC asks for a contact
-pytest                                       # offline tests on synthetic data
+git clone https://github.com/dmiller35/Amazon-Reviews-And-Stock-Pricing.git
+cd Amazon-Reviews-And-Stock-Pricing
+git checkout claude/focused-pascal-8sss7m
+bash scripts/setup.sh
 ```
 
-Hosts that must be reachable: `api.anthropic.com`, `api.apify.com`, `data.sec.gov`,
-`www.sec.gov`, `query1.finance.yahoo.com` (or `stooq.com`), and
-`mba.tuck.dartmouth.edu` (Fama-French/Carhart factors). Add
-`datarepo.eng.ucsd.edu` for the historical backtest data.
+`setup.sh` creates `.venv`, installs everything, asks for your Anthropic key,
+Apify token and a name+email for SEC requests (hidden input, saved to `.env`,
+which only you can read and git ignores), runs the tests, checks every data
+source and verifies each company against its SEC filings. Re-run it at any time;
+it keeps the existing `.env`. `reviewtone` loads `.env` by itself.
 
-## Running it (the 7 prompt steps)
+Then `source .venv/bin/activate` and:
+
+## Running it
 
 ```bash
-reviewtone verify --ticker LOGI            # 1. CIK, registrant, fiscal year end vs SEC
-reviewtone catalog --ticker LOGI --meta <meta_Electronics.jsonl.gz>   # 2. products.csv
-reviewtone fetch --ticker LOGI --source apify          # 3. reviews.csv (+ coverage/limits)
-reviewtone score --ticker LOGI                         # 4. Claude tone, tags, rubric.md
-reviewtone run --ticker LOGI                           # 5-7. quarters, charts, SEC join,
-                                                       #      held-out eval, prediction, report
-reviewtone run --all && reviewtone portfolio           # whole universe + long/short
+reviewtone backfill --all          # 1. history 2018-Sep 2023: products.csv + reviews.csv for every company
+                                   #    (streams ~36 GB once; 30-90 min depending on bandwidth; free)
+reviewtone fetch --ticker LOGI --source apify --max-reviews 300    # 2. recent reviews (Apify, paid:
+                                   #    top 20 products x 300 reviews = 6,000 reviews, about $12)
+reviewtone score --ticker LOGI --sample 200                        # 3. try Claude on 200 reviews, check cost
+reviewtone run --ticker LOGI --scorer naive_bayes                  # 4. score the rest cheaply, then
+                                   #    quarters, charts, SEC join, held-out eval, prediction, report
+reviewtone run --all && reviewtone portfolio                       # 5. every company + long/short list
 ```
 
-`run` also takes `--source apify|mcauley|csv` to fetch before running. Each step
-records what limited it, so a blocked source shows up in the report's
-Limitations section and isn't papered over.
+`backfill` only scans the categories listed in each company's file
+(`mcauley_categories`), streaming each category once for all companies. The
+prompt's step-by-step commands (`verify`, `catalog`, `fetch`, `score`) also work
+on their own. Each step records what limited it, so a blocked source shows up in
+the report's Limitations section and isn't papered over.
+
+**Your first `run` locks the study:** the rules in `config/study.yaml` and every
+company file. Decide on thresholds and companies before you run it.
 
 ### History: live scraping vs. the McAuley dataset
 
@@ -91,8 +102,10 @@ changes. Pick a pay-per-result actor, not a monthly rental. The default is
 [stanvanrooy6's Amazon Reviews Scraper (US)](https://apify.com/stanvanrooy6/amazon-review-scraper-us):
 about $2 per 1,000 reviews, no Amazon login, up to ~1,000 reviews per product.
 Check its Input tab once and fix the field names in `config/apify.yaml` if they
-differ. `--max-reviews` is per product. Use something like 1000 on the first fetch
-(about $2 per product at most); the weekly update uses 30. Built-in profiles for
+differ. Only each company's 20 most-reviewed products are scraped
+(`apify.top_products` in `config/study.yaml`, or `--top`). `--max-reviews` is per
+product: about 300 on the first fetch, and the weekly update uses 30. Rough cost:
+companies × products × reviews × $0.002, so 7 × 20 × 30 is about $8 a week. Built-in profiles for
 Axesso (star-filtered) and Junglee remain: set `actor:` to
 `axesso_data~amazon-reviews-scraper` or `junglee~amazon-reviews-scraper` and
 remove `input:`. The catch is depth: popular products still only reach back
@@ -110,8 +123,8 @@ the same lab's earlier release):
 
 ```bash
 reviewtone run --ticker LOGI --source mcauley \
-  --meta    https://datarepo.eng.ucsd.edu/mcauley_group/data/amazon_2023/raw/meta_categories/meta_Electronics.jsonl.gz \
-  --reviews https://datarepo.eng.ucsd.edu/mcauley_group/data/amazon_2023/raw/review_categories/Electronics.jsonl.gz
+  --meta    https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/raw/meta_categories/meta_Electronics.jsonl.gz \
+  --reviews https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/raw/review_categories/Electronics.jsonl.gz
 ```
 
 Then layer Apify on top for the quarters since. Both sources de-duplicate into the

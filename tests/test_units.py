@@ -26,6 +26,13 @@ def test_logitech_fiscal_calendar():
     assert q.shift(1).label == "FY27Q1" and q.shift(-4).label == "FY25Q4"
 
 
+def test_sec_fiscal_year_end_parsing():
+    from reviewtone.fiscal import parse_sec_fiscal_year_end as p
+    assert (p("0331"), p("0630"), p("1231"), p("0228"), p("0229")) == (3, 6, 12, 2, 2)
+    assert p("0102") == 12 and p("1001") == 9 and p("0928") == 9  # 52/53-week year ends
+    assert p("") is None and p("abc") is None
+
+
 def test_period_end_matching_for_52_53_week_years():
     dec = FiscalCalendar(12)
     assert dec.quarter_for_period_end("2025-09-27").label == "FY25Q3"
@@ -155,6 +162,8 @@ class _FakeClient:
     def create(self, **kw):
         import json
         self.calls += 1
+        if kw["model"].startswith("claude-haiku"):
+            assert "fallbacks" not in kw, "Haiku has no server-side refusal fallback"
         items = json.loads(kw["messages"][0]["content"])
         assert all("rating" not in it for it in items), "star rating must be hidden from the scorer"
         scores = [{"id": it["id"], "tone": -2 if "broke" in it["title"].lower() else 1,
@@ -165,7 +174,7 @@ class _FakeClient:
 
 def test_claude_scorer_parsing():
     client = _FakeClient()
-    s = ClaudeToneScorer(model="m", client=client, reviews_per_request=2)
+    s = ClaudeToneScorer(model="claude-haiku-5-5", client=client, reviews_per_request=2)
     df = pd.DataFrame({"review_id": ["a", "b", "skip"], "title": ["Broke fast", "Nice", "x"], "text": ["", "", ""],
                        "rating": [1, 5, 3]})
     out = s.score(df, progress=False)

@@ -18,6 +18,10 @@ SYSTEM = (
 )
 
 
+# Models that accept the server-side refusal fallback (Haiku does not).
+FALLBACK_MODELS = ("claude-fable-5", "claude-opus-5", "claude-sonnet-5-5")
+
+
 class ClaudeScorerError(RuntimeError):
     pass
 
@@ -34,17 +38,19 @@ class ClaudeToneScorer:
         self.client = client or anthropic.Anthropic(max_retries=5)
 
     def _request(self, items: list[dict[str, str]]) -> Any:
-        return self.client.beta.messages.create(
+        params: dict[str, Any] = dict(
             model=self.model,
             max_tokens=16000,
             system=SYSTEM,
             messages=[{"role": "user", "content": json.dumps(items, ensure_ascii=False)}],
             output_config={"effort": self.effort, "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}},
+        )
+        if self.model.startswith(FALLBACK_MODELS):
             # Server-side fallback: if a classifier declines, the API re-runs the
             # request on a fallback model inside the same call.
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-        )
+            return self.client.beta.messages.create(**params, betas=["server-side-fallback-2026-07-01"],
+                                                    fallbacks="default")
+        return self.client.messages.create(**params)
 
     def _score_chunk(self, chunk: pd.DataFrame) -> list[dict[str, Any]]:
         items = [

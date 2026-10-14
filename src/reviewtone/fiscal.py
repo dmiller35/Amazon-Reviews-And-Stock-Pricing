@@ -87,8 +87,14 @@ CALENDAR_QUARTERS = FiscalCalendar(12)
 
 
 def parse_sec_fiscal_year_end(value: str | None) -> int | None:
-    """SEC submissions report fiscalYearEnd as 'MMDD' (e.g. '0331')."""
+    """Fiscal year-end month from SEC 'MMDD' (e.g. '0331').
+
+    52/53-week years end on a weekday near a month end, so the reported date
+    can spill a few days into the next month (YETI: '0102' = the year ending
+    around December 31). Those are mapped back to the month they close.
+    """
     if not value or len(value) != 4 or not value.isdigit():
         return None
-    return int(value[:2])
+    month, day = int(value[:2]), int(value[2:])
+    return 12 if month == 1 and day <= 7 else (month - 1 if day <= 7 else month)
 

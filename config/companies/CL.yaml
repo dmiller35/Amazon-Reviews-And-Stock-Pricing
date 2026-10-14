@@ -1,4 +1,6 @@
 # One file per company. Add more with `reviewtone add-company`.
+# amazon_store_names: exact Amazon `store` names (matched case-insensitively).
+# mcauley_categories: Amazon Reviews 2023 categories searched by `reviewtone backfill`.
 ticker: CL
 name: Colgate-Palmolive Company
 fiscal_year_end: 12-31
@@ -6,3 +8,7 @@ brands:
 - name: Colgate
   amazon_store_names:
   - Colgate
+  - Colgate Palmolive
+mcauley_categories:
+- Health_and_Household
+- Beauty_and_Personal_Care

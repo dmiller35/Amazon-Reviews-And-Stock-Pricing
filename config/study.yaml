@@ -24,12 +24,19 @@ tone:
   #   or a manual labels CSV) and applied to every review.
   # lexicon: tiny offline word-list baseline for smoke tests only.
   scorer: claude
-  claude_model: claude-opus-5-5
+  # Haiku: fast and inexpensive; tone classification doesn't need a larger model.
+  claude_model: claude-haiku-5-5
   claude_effort: low
   reviews_per_request: 25
   # The paper scores the one-line review summary (title). We score title + body
   # but never show the star rating, so tone stays a separate signal from rating.
   include_body: true
+
+apify:
+  # Live scraping is paid per review, so only each company's N most-reviewed
+  # products (plus any in seed_asins.csv) are scraped. Cost per run is roughly
+  # companies x top_products x max_reviews x ~$0.002.
+  top_products: 20
 
 aggregation:
   # A fiscal quarter with fewer product-opinion reviews than this is flagged sparse

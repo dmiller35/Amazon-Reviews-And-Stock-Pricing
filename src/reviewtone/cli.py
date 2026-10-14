@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date
+from pathlib import Path
 
 from .config import load_study
 from .http import SourceUnavailable
@@ -19,6 +21,18 @@ def _factors():
         print(f"! Carhart factors unavailable ({e}); abnormal returns and portfolio alpha are skipped.",
               file=sys.stderr)
         return None
+
+
+def load_dotenv(path: Path) -> None:
+    """Read KEY=value lines from .env into the environment (existing variables win)."""
+    if not path.is_file():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.removeprefix("export ").partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
 def _tickers(study, args) -> list[str]:
@@ -46,6 +60,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--name", help="registrant name (default: looked up on SEC EDGAR)")
     p.add_argument("--fye", help="fiscal year end MM-DD (default: looked up on SEC EDGAR)")
     p.add_argument("--asins", nargs="*", default=[], help="optional seed ASINs written to seed_asins.csv")
+    p.add_argument("--categories", nargs="*", default=[],
+                   help="Amazon Reviews 2023 categories for backfill, e.g. Electronics Home_and_Kitchen")
+
+    p = sub.add_parser("backfill", help="historical reviews (2018-Sep 2023) from Amazon Reviews 2023")
+    company_args(p)
+    p.add_argument("--categories", nargs="*", help="override the categories in the company config")
 
     p = sub.add_parser("verify", help="step 1: check CIK, name and fiscal year end on SEC EDGAR")
     company_args(p)
@@ -59,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--source", choices=["apify", "mcauley", "csv"], required=True)
     p.add_argument("--reviews", nargs="*", default=[], help="McAuley <Category>.jsonl(.gz) paths or URLs")
     p.add_argument("--csv", help="reviews CSV for --source csv")
+    p.add_argument("--top", type=int, help="Apify: scrape only the N most-reviewed products (default: config)")
     p.add_argument("--max-reviews", type=int, default=100,
                    help="Apify: newest reviews per product (per star rating for star-filtered actors)")
 
@@ -75,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--csv")
     p.add_argument("--max-reviews", type=int, default=100, help="Apify: newest reviews per product (per star for star-filtered actors)")
     p.add_argument("--scorer", choices=["claude", "naive_bayes", "lexicon"])
+    p.add_argument("--top", type=int, help="Apify: scrape only the N most-reviewed products (default: config)")
     p.add_argument("--new-study", action="store_true", help="re-register the study after changing config")
 
     sub.add_parser("portfolio", help="universe long/short portfolio and its Carhart alpha")
@@ -84,6 +106,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="newest reviews per product (per star for star-filtered actors); older ones are stored")
 
     args = ap.parse_args(argv)
+    load_dotenv(Path.cwd() / ".env")
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     study = load_study(args.config)
     as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
 
@@ -91,6 +115,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "add-company":
         return _add_company(study, args)
+    if args.cmd == "backfill":
+        from .pipeline import backfill
+        for t, info in backfill(study, _tickers(study, args), args.categories).items():
+            print(f"{t}: {info['products']} products, {info['reviews_added']} reviews added"
+                  + (f", errors: {info['errors']}" if info["errors"] else ""))
+        return 0
     if args.cmd == "verify":
         for t in _tickers(study, args):
             print(json.dumps(Run(study, study.company(t), as_of=as_of).verify(), indent=2, default=str))
@@ -99,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{len(products)} products")
     elif args.cmd == "fetch":
         run = Run(study, study.company(_tickers(study, args)[0]), as_of=as_of)
-        print(f"{run.fetch_reviews(args.source, review_locations=args.reviews, csv_path=args.csv, max_reviews_per_product=args.max_reviews)} new reviews")
+        print(f"{run.fetch_reviews(args.source, review_locations=args.reviews, csv_path=args.csv, max_reviews_per_product=args.max_reviews, top_products=args.top)} new reviews")
     elif args.cmd == "score":
         run = Run(study, study.company(_tickers(study, args)[0]), as_of=as_of, scorer=args.scorer)
         print(f"{len(run.score(sample=args.sample))} reviews have scores")
@@ -108,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         for t in _tickers(study, args):
             card = run_company(study, t, source=args.source, factors=factors, meta=args.meta,
                                review_files=args.reviews, csv_path=args.csv, max_reviews=args.max_reviews,
-                               scorer=args.scorer, new_study=args.new_study, as_of=as_of)
+                               scorer=args.scorer, new_study=args.new_study, as_of=as_of, top_products=args.top)
             print(json.dumps(card, indent=2, default=str))
     elif args.cmd == "portfolio":
         print(json.dumps(run_universe(study, _factors(), as_of), indent=2, default=str))
@@ -139,7 +169,7 @@ def _add_company(study, args) -> int:
     for spec in args.brand:
         brand, _, stores = spec.partition("=")
         brands[brand.strip()] = [s.strip() for s in stores.split(",") if s.strip()]
-    path = write_company(study, args.ticker, name, fye, brands)
+    path = write_company(study, args.ticker, name, fye, brands, args.categories)
     print(f"wrote {path}")
     if args.asins:
         seed = study.ticker_dir(args.ticker) / "seed_asins.csv"

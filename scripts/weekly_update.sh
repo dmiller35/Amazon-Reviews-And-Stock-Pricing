@@ -7,9 +7,10 @@
 #   17 6 * * 1  cd /path/to/Amazon-Reviews-And-Stock-Pricing && scripts/weekly_update.sh >> research/update.log 2>&1
 #
 # Needs ANTHROPIC_API_KEY, APIFY_TOKEN and SEC_USER_AGENT in the environment
-# (or in a .env file next to this repo, which is sourced if present).
+# or in the repo's .env file (created by scripts/setup.sh).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-[ -f .env ] && set -a && . ./.env && set +a
+[ -x .venv/bin/reviewtone ] && PATH="$PWD/.venv/bin:$PATH"   # created by scripts/setup.sh
+# reviewtone reads .env itself.
 echo "== reviewtone weekly update $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-reviewtone update --max-reviews "${MAX_REVIEWS_PER_STAR:-30}"
+reviewtone update --max-reviews "${MAX_REVIEWS:-30}"

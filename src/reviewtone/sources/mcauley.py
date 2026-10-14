@@ -23,7 +23,7 @@ import requests
 from ..config import Company
 from ..http import AccessLog, SourceUnavailable, utcnow
 
-BASE_URL = "https://datarepo.eng.ucsd.edu/mcauley_group/data/amazon_2023/raw"
+BASE_URL = "https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/raw"
 
 
 def category_urls(category: str) -> tuple[str, str]:
@@ -116,3 +116,47 @@ def reviews_for_products(review_location: str | Path, products: pd.DataFrame, co
             "fetched_at": fetched_at,
         })
     return pd.DataFrame(rows)
+
+
+def match_any(store: str | None, companies: list[Company]) -> tuple[str, str] | None:
+    for c in companies:
+        b = match_brand(store, c)
+        if b:
+            return c.ticker, b
+    return None
+
+
+def scan_category(category: str, companies: list[Company], log: AccessLog | None = None,
+                  meta_location: str | None = None, review_location: str | None = None):
+    """Stream one category's metadata and reviews once for several companies.
+
+    Returns (products DataFrame with a `ticker` column, generator of review rows).
+    """
+    meta_url, review_url = category_urls(category)
+    rows, owner = [], {}
+    for item in iter_jsonl(meta_location or meta_url, log):
+        hit = match_any(item.get("store"), companies)
+        if not hit or not item.get("parent_asin"):
+            continue
+        ticker, brand = hit
+        owner[item["parent_asin"]] = (ticker, brand)
+        rows.append({"ticker": ticker, "brand": brand, "asin": item["parent_asin"],
+                     "parent_asin": item["parent_asin"], "title": item.get("title", ""), "store": item.get("store"),
+                     "category": item.get("main_category") or category, "rating_number": item.get("rating_number"),
+                     "url": f"https://www.amazon.com/dp/{item['parent_asin']}", "official_store": True,
+                     "source": f"mcauley2023:{category}", "discovered_at": utcnow()})
+
+    def reviews():
+        fetched_at = utcnow()
+        for r in iter_jsonl(review_location or review_url, log):
+            hit = owner.get(r.get("parent_asin"))
+            if hit is None:
+                continue
+            yield {"review_id": None, "ticker": hit[0], "brand": hit[1], "asin": r.get("asin"),
+                   "parent_asin": r.get("parent_asin"),
+                   "review_date": pd.Timestamp(r["timestamp"], unit="ms").strftime("%Y-%m-%d"),
+                   "rating": r.get("rating"), "title": r.get("title", ""), "text": r.get("text", ""),
+                   "verified": r.get("verified_purchase"), "variant": "", "source": f"mcauley2023:{category}",
+                   "source_url": f"https://www.amazon.com/dp/{r.get('asin')}", "fetched_at": fetched_at}
+
+    return pd.DataFrame(rows), reviews()

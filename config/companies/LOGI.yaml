@@ -1,4 +1,6 @@
 # One file per company. Add more with `reviewtone add-company`.
+# amazon_store_names: exact Amazon `store` names (matched case-insensitively).
+# mcauley_categories: Amazon Reviews 2023 categories searched by `reviewtone backfill`.
 ticker: LOGI
 name: Logitech International S.A.
 fiscal_year_end: 03-31
@@ -9,3 +11,8 @@ brands:
   - Logitech G
   - Logitech for Creators
   - Logitech for Business
+mcauley_categories:
+- Electronics
+- Video_Games
+- Cell_Phones_and_Accessories
+- Office_Products

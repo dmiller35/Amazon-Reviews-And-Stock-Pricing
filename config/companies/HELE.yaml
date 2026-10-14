@@ -1,4 +1,6 @@
 # One file per company. Add more with `reviewtone add-company`.
+# amazon_store_names: exact Amazon `store` names (matched case-insensitively).
+# mcauley_categories: Amazon Reviews 2023 categories searched by `reviewtone backfill`.
 ticker: HELE
 name: Helen of Troy Limited
 fiscal_year_end: 02-28
@@ -6,6 +8,11 @@ brands:
 - name: OXO
   amazon_store_names:
   - OXO
+  - OXO Tot
 - name: Hydro Flask
   amazon_store_names:
   - Hydro Flask
+mcauley_categories:
+- Home_and_Kitchen
+- Sports_and_Outdoors
+- Health_and_Household

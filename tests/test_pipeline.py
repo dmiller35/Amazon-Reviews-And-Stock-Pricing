@@ -70,3 +70,33 @@ def test_universe_portfolio_long_short():
     assert int(latest["n_groups"].iloc[0]) == 2  # 6 firms -> halves
     assert q["equal_long_short"].mean() > 0
     assert alphas["equal"]["long_short"]["n_quarters"] == len(q)
+
+
+def test_backfill_streams_category_once_for_several_companies(study, tmp_path, monkeypatch):
+    import gzip
+
+    from reviewtone.pipeline import backfill
+
+    meta = [{"parent_asin": "P1", "store": "YETI", "title": "Tumbler"},
+            {"parent_asin": "P2", "store": "hydro flask", "title": "Bottle"},
+            {"parent_asin": "P3", "store": "Custom YETI", "title": "Not official"}]
+    revs = [{"parent_asin": "P1", "asin": "C1", "timestamp": 1_600_000_000_000, "rating": 5.0, "title": "Great",
+             "text": "Keeps ice for days", "verified_purchase": True},
+            {"parent_asin": "P2", "asin": "P2", "timestamp": 1_650_000_000_000, "rating": 2.0, "title": "Leaks",
+             "text": "Lid leaks after a month", "verified_purchase": True},
+            {"parent_asin": "P3", "asin": "P3", "timestamp": 1_650_000_000_000, "rating": 4.0, "title": "x",
+             "text": "y", "verified_purchase": False}]
+    for name, rows in (("meta.jsonl.gz", meta), ("reviews.jsonl.gz", revs)):
+        with gzip.open(tmp_path / name, "wt") as f:
+            f.write("\n".join(json.dumps(r) for r in rows) + "\n")
+    monkeypatch.setattr("reviewtone.sources.mcauley.category_urls",
+                        lambda c: (str(tmp_path / "meta.jsonl.gz"), str(tmp_path / "reviews.jsonl.gz")))
+
+    out = backfill(study, ["YETI", "HELE"], categories=["Sports_and_Outdoors"], chunk=1)
+    assert out["YETI"]["reviews_added"] == 1 and out["HELE"]["reviews_added"] == 1
+    yeti = pd.read_csv(study.ticker_dir("YETI") / "reviews.csv")
+    assert yeti.loc[0, "review_date"] == "2020-09-13" and yeti.loc[0, "parent_asin"] == "P1"
+    assert pd.read_csv(study.ticker_dir("HELE") / "products.csv")["brand"].tolist() == ["Hydro Flask"]
+    again = backfill(study, ["YETI", "HELE"], categories=["Sports_and_Outdoors"])  # idempotent
+    assert again["YETI"]["reviews_added"] == 0 and again["HELE"]["reviews_added"] == 0
+    assert len(pd.read_csv(study.ticker_dir("YETI") / "reviews.csv")) == 1

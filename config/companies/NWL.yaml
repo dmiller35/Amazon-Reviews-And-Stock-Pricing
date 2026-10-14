@@ -1,4 +1,6 @@
 # One file per company. Add more with `reviewtone add-company`.
+# amazon_store_names: exact Amazon `store` names (matched case-insensitively).
+# mcauley_categories: Amazon Reviews 2023 categories searched by `reviewtone backfill`.
 ticker: NWL
 name: Newell Brands Inc.
 fiscal_year_end: 12-31
@@ -7,6 +9,12 @@ brands:
   amazon_store_names:
   - Rubbermaid
   - Rubbermaid Commercial Products
+  - Rubbermaid Commercial
 - name: Sharpie
   amazon_store_names:
   - Sharpie
+mcauley_categories:
+- Home_and_Kitchen
+- Office_Products
+- Health_and_Household
+- Sports_and_Outdoors

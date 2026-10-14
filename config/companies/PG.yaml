@@ -1,4 +1,6 @@
 # One file per company. Add more with `reviewtone add-company`.
+# amazon_store_names: exact Amazon `store` names (matched case-insensitively).
+# mcauley_categories: Amazon Reviews 2023 categories searched by `reviewtone backfill`.
 ticker: PG
 name: The Procter & Gamble Company
 fiscal_year_end: 06-30
@@ -6,3 +8,5 @@ brands:
 - name: Tide
   amazon_store_names:
   - Tide
+mcauley_categories:
+- Health_and_Household

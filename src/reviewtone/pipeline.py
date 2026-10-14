@@ -93,7 +93,8 @@ class Run:
 
     # Step 3 ---------------------------------------------------------------
     def fetch_reviews(self, source: str, *, review_locations: list[str] | None = None,
-                      max_reviews_per_product: int = 100, csv_path: str | None = None) -> int:
+                      max_reviews_per_product: int = 100, csv_path: str | None = None,
+                      top_products: int | None = None) -> int:
         products = pd.read_csv(self.dir / "products.csv", dtype=str) if (self.dir / "products.csv").exists() \
             else pd.DataFrame(columns=catalog.PRODUCT_COLUMNS)
         frames, errors = [], []
@@ -111,6 +112,13 @@ class Run:
             from .sources.apify import ApifyReviews
             client = ApifyReviews(log=self.log)
             stored = rv.load(self.dir / "reviews.csv")
+            # Scraping is paid per review, so only the most-reviewed products are
+            # followed live. Hand-seeded ASINs always come first.
+            top = top_products or self.study.raw.get("apify", {}).get("top_products", 20)
+            products = products.assign(
+                _seed=products["source"].astype(str).str.startswith("manual"),
+                _n=pd.to_numeric(products.get("rating_number"), errors="coerce").fillna(0),
+            ).sort_values(["_seed", "_n"], ascending=False).head(top)
             for p in products.itertuples():
                 try:
                     res = client.fetch(p.asin, ticker=self.company.ticker, brand=p.brand,
@@ -250,10 +258,67 @@ class Run:
         return dest
 
 
+def backfill(study: Study, tickers: list[str], categories: list[str] | None = None,
+             chunk: int = 50_000) -> dict[str, dict]:
+    """Historical reviews from Amazon Reviews 2023 (through Sep 2023).
+
+    Each category file is streamed once for every company that sells in it;
+    products go to products.csv and reviews to reviews.csv (append-only).
+    """
+    from .sources import mcauley
+
+    companies = [study.company(t) for t in tickers]
+    by_cat: dict[str, list[Company]] = {}
+    for c in companies:
+        for cat in categories or c.mcauley_categories:
+            by_cat.setdefault(cat, []).append(c)
+    runs = {c.ticker: Run(study, c) for c in companies}
+    tmp = {t: r.dir / "_backfill.csv" for t, r in runs.items()}
+    for p in tmp.values():
+        p.unlink(missing_ok=True)
+    summary = {t: {"products": 0, "reviews_streamed": 0, "categories": [], "errors": []} for t in runs}
+    for cat, cos in by_cat.items():
+        print(f"{cat}: scanning for {', '.join(c.ticker for c in cos)}", flush=True)
+        try:
+            products, rows = mcauley.scan_category(cat, cos, runs[cos[0].ticker].log)
+            for t, prods in products.groupby("ticker") if len(products) else []:
+                old = runs[t].dir / "products.csv"
+                merged, _ = catalog.merge_products(prods, pd.read_csv(old, dtype=str) if old.exists() else None)
+                merged.to_csv(old, index=False)
+                summary[t]["products"] += len(prods)
+            buf: list[dict] = []
+            for row in rows:
+                buf.append(row)
+                if len(buf) >= chunk:
+                    _flush(buf, tmp, summary)
+            _flush(buf, tmp, summary)
+            for c in cos:
+                summary[c.ticker]["categories"].append(cat)
+        except SourceUnavailable as e:
+            for c in cos:
+                summary[c.ticker]["errors"].append(f"{cat}: {e}")
+    for t, run in runs.items():
+        added = rv.append_new(run.dir / "reviews.csv", pd.read_csv(tmp[t], dtype=str)) if tmp[t].exists() else []
+        tmp[t].unlink(missing_ok=True)
+        summary[t]["reviews_added"] = len(added)
+        run.note("backfill_mcauley", **summary[t])
+    return summary
+
+
+def _flush(buf: list[dict], tmp: dict[str, Path], summary: dict) -> None:
+    if not buf:
+        return
+    df = pd.DataFrame(buf)
+    for t, part in df.groupby("ticker"):
+        part.to_csv(tmp[t], mode="a", header=not tmp[t].exists(), index=False)
+        summary[t]["reviews_streamed"] += len(part)
+    buf.clear()
+
+
 def run_company(study: Study, ticker: str, *, source: str | None, factors: pd.DataFrame | None,
                 meta: list[str] | None = None, review_files: list[str] | None = None, csv_path: str | None = None,
                 max_reviews: int = 100, scorer: str | None = None, new_study: bool = False,
-                as_of: date | None = None) -> dict:
+                as_of: date | None = None, top_products: int | None = None) -> dict:
     from .predict import prediction_card
     from .report import write_report
 
@@ -262,7 +327,7 @@ def run_company(study: Study, ticker: str, *, source: str | None, factors: pd.Da
     run.build_catalog(meta)
     if source:
         run.fetch_reviews(source, review_locations=review_files, max_reviews_per_product=max_reviews,
-                          csv_path=csv_path)
+                          csv_path=csv_path, top_products=top_products)
     if rv.load(run.dir / "reviews.csv").empty:
         run.note("aggregate", error="no reviews collected")
         q = pd.DataFrame()
