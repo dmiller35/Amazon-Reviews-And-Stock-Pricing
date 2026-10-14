@@ -93,7 +93,7 @@ class Run:
 
     # Step 3 ---------------------------------------------------------------
     def fetch_reviews(self, source: str, *, review_locations: list[str] | None = None,
-                      max_reviews_per_product: int = 500, csv_path: str | None = None) -> int:
+                      max_reviews_per_product: int = 100, csv_path: str | None = None) -> int:
         products = pd.read_csv(self.dir / "products.csv", dtype=str) if (self.dir / "products.csv").exists() \
             else pd.DataFrame(columns=catalog.PRODUCT_COLUMNS)
         frames, errors = [], []
@@ -113,16 +113,16 @@ class Run:
             stored = rv.load(self.dir / "reviews.csv")
             for p in products.itertuples():
                 try:
-                    df = client.fetch([p.asin], ticker=self.company.ticker, brand=p.brand,
-                                      max_reviews=max_reviews_per_product)
+                    res = client.fetch(p.asin, ticker=self.company.ticker, brand=p.brand,
+                                       max_reviews=max_reviews_per_product)
                 except SourceUnavailable as e:
                     errors.append(str(e))
                     if "APIFY_TOKEN" in str(e) or "unreachable" in str(e):
                         break
                     continue
-                frames.append(df.assign(parent_asin=df["parent_asin"].fillna(p.parent_asin)))
+                frames.append(res.reviews.assign(parent_asin=res.reviews["parent_asin"].fillna(p.parent_asin)))
                 mine = stored[(stored["asin"] == p.asin) | (stored["parent_asin"] == p.asin)]
-                self._record_coverage(p.asin, df, max_reviews_per_product,
+                self._record_coverage(p.asin, res.reviews, res.hit_cap, res.complete_from,
                                       mine["review_date"].max() if len(mine) else None)
         elif source == "csv":
             frames.append(pd.read_csv(csv_path).assign(ticker=self.company.ticker))
@@ -135,20 +135,20 @@ class Run:
                   n_errors=len(errors), **({"error": errors[0]} if errors and not len(new) else {}))
         return len(added)
 
-    def _record_coverage(self, asin: str, df: pd.DataFrame, cap: int, stored_newest: str | None) -> None:
+    def _record_coverage(self, asin: str, df: pd.DataFrame, hit_cap: bool, complete_from: str | None,
+                         stored_newest: str | None) -> None:
         """Log fetch depth and any hole it leaves in the product's history.
 
-        A fetch that hits the cap returns only the newest `cap` reviews. If its
-        oldest review is still newer than the newest one already stored (from
-        an earlier fetch or the historical dataset), reviews in between are
-        missing: that window is a gap. Overlapping fetches leave no gap.
+        A capped fetch is complete only from `complete_from` on. If that is still
+        newer than the newest review already stored (from an earlier fetch or
+        the historical dataset), reviews in between may be missing: that window
+        is a gap. Overlapping fetches leave no gap.
         """
-        oldest = df["review_date"].min() if len(df) else None
-        hit_cap = len(df) >= cap
-        gap = hit_cap and oldest is not None and (stored_newest is None or oldest > stored_newest)
-        row = pd.DataFrame([{"asin": asin, "reviews": len(df), "oldest": oldest,
+        gap = hit_cap and complete_from is not None and (stored_newest is None or complete_from > stored_newest)
+        row = pd.DataFrame([{"asin": asin, "reviews": len(df), "oldest": df["review_date"].min() if len(df) else None,
                              "newest": df["review_date"].max() if len(df) else None, "hit_cap": hit_cap,
-                             "gap_start": stored_newest if gap else None, "gap_end": oldest if gap else None,
+                             "complete_from": complete_from,
+                             "gap_start": stored_newest if gap else None, "gap_end": complete_from if gap else None,
                              "fetched_at": utcnow()}])
         path = self.dir / "coverage.csv"
         row.to_csv(path, mode="a", header=not path.exists(), index=False)
@@ -252,7 +252,7 @@ class Run:
 
 def run_company(study: Study, ticker: str, *, source: str | None, factors: pd.DataFrame | None,
                 meta: list[str] | None = None, review_files: list[str] | None = None, csv_path: str | None = None,
-                max_reviews: int = 500, scorer: str | None = None, new_study: bool = False,
+                max_reviews: int = 100, scorer: str | None = None, new_study: bool = False,
                 as_of: date | None = None) -> dict:
     from .predict import prediction_card
     from .report import write_report

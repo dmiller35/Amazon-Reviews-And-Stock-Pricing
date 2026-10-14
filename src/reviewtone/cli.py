@@ -59,7 +59,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--source", choices=["apify", "mcauley", "csv"], required=True)
     p.add_argument("--reviews", nargs="*", default=[], help="McAuley <Category>.jsonl(.gz) paths or URLs")
     p.add_argument("--csv", help="reviews CSV for --source csv")
-    p.add_argument("--max-reviews", type=int, default=500, help="per-product cap for Apify")
+    p.add_argument("--max-reviews", type=int, default=100,
+                   help="Apify: newest reviews per product per star rating (Amazon allows up to 100)")
 
     p = sub.add_parser("score", help="step 4: score tone of unscored reviews")
     company_args(p, allow_all=False)
@@ -72,15 +73,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--meta", nargs="*", default=[])
     p.add_argument("--reviews", nargs="*", default=[])
     p.add_argument("--csv")
-    p.add_argument("--max-reviews", type=int, default=500)
+    p.add_argument("--max-reviews", type=int, default=100, help="Apify: per product per star rating (max 100)")
     p.add_argument("--scorer", choices=["claude", "naive_bayes", "lexicon"])
     p.add_argument("--new-study", action="store_true", help="re-register the study after changing config")
 
     sub.add_parser("portfolio", help="universe long/short portfolio and its Carhart alpha")
 
     p = sub.add_parser("update", help="weekly job: fetch new Apify reviews, rescore, re-evaluate, snapshot")
-    p.add_argument("--max-reviews", type=int, default=100,
-                   help="newest reviews per product to fetch (older ones are already stored)")
+    p.add_argument("--max-reviews", type=int, default=30,
+                   help="newest reviews per product per star rating; older ones are already stored")
 
     args = ap.parse_args(argv)
     study = load_study(args.config)

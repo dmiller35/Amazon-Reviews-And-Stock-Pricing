@@ -198,11 +198,11 @@ def test_coverage_gaps_only_flag_missing_windows(study):
     run = Run(study, study.company("LOGI"))
     capped = pd.DataFrame({"review_date": pd.date_range("2026-05-01", periods=100, freq="D").strftime("%Y-%m-%d")})
     # Historical data ends 2023-09-28, first live fetch is capped at 100 reviews starting 2026-05-01: a gap.
-    run._record_coverage("A1", capped, cap=100, stored_newest="2023-09-28")
+    run._record_coverage("A1", capped, True, "2026-05-01", stored_newest="2023-09-28")
     # Next week's capped fetch overlaps what is stored: no new gap.
-    run._record_coverage("A1", capped.iloc[10:].reset_index(drop=True), cap=100, stored_newest="2026-08-08")
+    run._record_coverage("A1", capped.iloc[10:].reset_index(drop=True), True, "2026-05-11", stored_newest="2026-08-08")
     # A product with no history whose fetch did not hit the cap is complete: no gap.
-    run._record_coverage("B2", capped.iloc[:20], cap=100, stored_newest=None)
+    run._record_coverage("B2", capped.iloc[:20], False, None, stored_newest=None)
     gaps = aggregate.coverage_gaps(pd.read_csv(run.dir / "coverage.csv"))
     assert gaps == [(date(2023, 9, 28), date(2026, 5, 1))]
 
@@ -217,3 +217,29 @@ def test_coverage_gaps_only_flag_missing_windows(study):
     assert not flags.loc["FY27Q2", "partial_coverage"]          # Jul-Sep 2026: complete again
     assert flags.loc["FY28Q1", "partial_baseline"]              # baseline still reaches into the gap
     assert flags.loc["FY28Q3", "usable"]                        # four clean quarters later: callable
+
+
+def test_axesso_profile_star_filters_and_truncation():
+    from reviewtone.sources.apify import PROFILES, completeness
+
+    prof = PROFILES["axesso_data~amazon-reviews-scraper"]
+    inp = prof.build("B003NR57BY", 100)["input"]
+    assert [i["filterByStar"] for i in inp] == ["one_star", "two_star", "three_star", "four_star", "five_star"]
+    assert all(i["maxPages"] == 10 and i["sortBy"] == "recent" and i["domainCode"] == "com" for i in inp)
+    assert prof.cap(100) == 100 and prof.cap(30) == 30
+
+    # 5-star list hit its 100-review cap reaching back to June; 1-star list is complete back to 2024.
+    five = pd.DataFrame({"rating": 5.0, "review_date": pd.date_range("2026-06-01", periods=100).strftime("%Y-%m-%d")})
+    one = pd.DataFrame({"rating": 1.0, "review_date": ["2024-01-05", "2026-09-01"]})
+    hit, complete_from = completeness(pd.concat([five, one]), prof.cap(100), by_star=True)
+    assert hit and complete_from == "2026-06-01"
+    assert completeness(one, 100, by_star=True) == (False, None)
+
+
+def test_non_us_reviews_dropped_by_date_line():
+    items = [{"reviewId": "a", "asin": "X", "rating": "5.0 out of 5 stars", "title": "t", "text": "x",
+              "date": "Reviewed in the United States on May 2, 2026"},
+             {"reviewId": "b", "asin": "X", "rating": "1.0 out of 5 stars", "title": "t", "text": "y",
+              "date": "Reviewed in the United Kingdom on May 2, 2026"}]
+    df, _ = normalize_items(items, ticker="LOGI", brand="Logitech", fetched_at="now")
+    assert df["review_id"].tolist() == ["a"]

@@ -12,4 +12,4 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -f .env ] && set -a && . ./.env && set +a
 echo "== reviewtone weekly update $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-reviewtone update --max-reviews "${MAX_REVIEWS_PER_PRODUCT:-100}"
+reviewtone update --max-reviews "${MAX_REVIEWS_PER_STAR:-30}"
