@@ -91,8 +91,16 @@ prompt's step-by-step commands (`verify`, `catalog`, `fetch`, `score`) also work
 on their own. Each step records what limited it, so a blocked source shows up in
 the report's Limitations section and isn't papered over.
 
-**Your first `run` locks the study:** the rules in `config/study.yaml` and every
-company file. Decide on thresholds and companies before you run it.
+**Your first `run` locks the study:** the rules in `config/study.yaml` (including
+`apify.top_products` and `product_scope`) and every company file. Decide on
+thresholds, companies and how many products to follow before you run it.
+
+Tone is measured on the **tracked products**: the ones followed live, i.e. each
+company's 20 most-reviewed plus any in `seed_asins.csv`. That applies to every
+quarter, historical and live, so AbnormalTone compares like with like when the
+data switches from the historical dataset to the scraper. The historical
+dataset ends in September 2023; until live data arrives, quarters from that
+date on are marked as a coverage gap.
 
 ### History: live scraping vs. the McAuley dataset
 

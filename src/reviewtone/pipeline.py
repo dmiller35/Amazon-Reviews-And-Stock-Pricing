@@ -112,14 +112,7 @@ class Run:
             from .sources.apify import ApifyReviews
             client = ApifyReviews(log=self.log)
             stored = rv.load(self.dir / "reviews.csv")
-            # Scraping is paid per review, so only the most-reviewed products are
-            # followed live. Hand-seeded ASINs always come first.
-            top = top_products or self.study.raw.get("apify", {}).get("top_products", 20)
-            products = products.assign(
-                _seed=products["source"].astype(str).str.startswith("manual"),
-                _n=pd.to_numeric(products.get("rating_number"), errors="coerce").fillna(0),
-            ).sort_values(["_seed", "_n"], ascending=False).head(top)
-            for p in products.itertuples():
+            for p in self.tracked_products(products, top_products).itertuples():
                 try:
                     res = client.fetch(p.asin, ticker=self.company.ticker, brand=p.brand,
                                        max_reviews=max_reviews_per_product)
@@ -142,6 +135,22 @@ class Run:
         self.note(f"fetch_{source}", fetched=len(new), added=len(added), errors=errors[:10],
                   n_errors=len(errors), **({"error": errors[0]} if errors and not len(new) else {}))
         return len(added)
+
+    def tracked_products(self, products: pd.DataFrame | None = None, top: int | None = None) -> pd.DataFrame:
+        """The products followed live: hand-seeded ASINs, then the most-reviewed.
+
+        Scraping is paid per review, so only these are scraped. Tone is also
+        measured on exactly this set in every quarter, historical or live, so a
+        change in AbnormalTone can't come from a change in which products are
+        counted.
+        """
+        if products is None:
+            path = self.dir / "products.csv"
+            products = pd.read_csv(path, dtype=str) if path.exists() else pd.DataFrame(columns=catalog.PRODUCT_COLUMNS)
+        top = top or self.study.raw.get("apify", {}).get("top_products", 20)
+        return (products.assign(_seed=products["source"].astype(str).str.startswith("manual"),
+                                _n=pd.to_numeric(products["rating_number"], errors="coerce").fillna(0))
+                .sort_values(["_seed", "_n"], ascending=False).head(top).drop(columns=["_seed", "_n"]))
 
     def _record_coverage(self, asin: str, df: pd.DataFrame, hit_cap: bool, complete_from: str | None,
                          stored_newest: str | None) -> None:
@@ -180,9 +189,19 @@ class Run:
     # Step 5 ---------------------------------------------------------------
     def aggregate(self, cal: FiscalCalendar | None = None, write: bool = True) -> pd.DataFrame:
         reviews = rv.load(self.dir / "reviews.csv")
+        scope = self.study.aggregation.get("product_scope", "tracked")
+        tracked = self.tracked_products()
+        if scope == "tracked" and len(tracked):
+            ids = set(tracked["asin"]) | set(tracked["parent_asin"].dropna())
+            reviews = reviews[reviews["asin"].isin(ids) | reviews["parent_asin"].isin(ids)]
         scored = aggregate.attach_scores(reviews, self._scores())
         cov_path = self.dir / "coverage.csv"
-        gaps = aggregate.coverage_gaps(pd.read_csv(cov_path)) if cov_path.exists() else []
+        coverage = pd.read_csv(cov_path) if cov_path.exists() else pd.DataFrame()
+        gaps = aggregate.coverage_gaps(coverage)
+        dataset_end = self._status().get("backfill_mcauley", {}).get("dataset_end")
+        if dataset_end and coverage.empty:
+            # Historical data stops here and no live fetch has filled in after it.
+            gaps.append((date.fromisoformat(dataset_end), date.max))
         q = aggregate.quarterly_measures(scored, cal or self.cal,
                                          min_reviews=self.study.aggregation["min_reviews_per_quarter"],
                                          as_of=self.as_of, gaps=gaps)
@@ -301,6 +320,9 @@ def backfill(study: Study, tickers: list[str], categories: list[str] | None = No
         added = rv.append_new(run.dir / "reviews.csv", pd.read_csv(tmp[t], dtype=str)) if tmp[t].exists() else []
         tmp[t].unlink(missing_ok=True)
         summary[t]["reviews_added"] = len(added)
+        stored = rv.load(run.dir / "reviews.csv")
+        hist = stored[stored["source"].astype(str).str.startswith("mcauley")]
+        summary[t]["dataset_end"] = hist["review_date"].max() if len(hist) else None
         run.note("backfill_mcauley", **summary[t])
     return summary
 

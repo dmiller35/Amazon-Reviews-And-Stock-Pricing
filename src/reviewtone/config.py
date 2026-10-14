@@ -110,6 +110,8 @@ class Study:
             "evaluation": self.raw["evaluation"],
             "portfolio": self.raw["portfolio"],
             "min_reviews_per_quarter": self.raw["aggregation"]["min_reviews_per_quarter"],
+            "product_scope": self.raw["aggregation"].get("product_scope", "tracked"),
+            "top_products": self.raw.get("apify", {}).get("top_products", 20),
         }
         blob = json.dumps(locked, sort_keys=True).encode()
         return hashlib.sha256(blob).hexdigest()

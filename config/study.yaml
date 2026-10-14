@@ -42,6 +42,11 @@ aggregation:
   # A fiscal quarter with fewer product-opinion reviews than this is flagged sparse
   # and never used for a call.
   min_reviews_per_quarter: 30
+  # tracked: measure tone only on the products followed live (apify.top_products
+  # plus seed_asins.csv) in every quarter, so history and live data compare the
+  # same products. all: every catalogued product (the paper's approach; only
+  # sound when every product is also scraped live).
+  product_scope: tracked
   # Quarters of history the prompt asks for before results are trusted.
   target_complete_quarters: 12
 

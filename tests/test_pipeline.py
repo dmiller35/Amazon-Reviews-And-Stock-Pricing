@@ -1,6 +1,7 @@
 """Offline end-to-end runs on synthetic data (code-path verification only)."""
 
 import json
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -100,3 +101,31 @@ def test_backfill_streams_category_once_for_several_companies(study, tmp_path, m
     again = backfill(study, ["YETI", "HELE"], categories=["Sports_and_Outdoors"])  # idempotent
     assert again["YETI"]["reviews_added"] == 0 and again["HELE"]["reviews_added"] == 0
     assert len(pd.read_csv(study.ticker_dir("YETI") / "reviews.csv")) == 1
+
+
+def test_tracked_products_scope_and_dataset_end(study):
+    from reviewtone.pipeline import Run
+
+    run = Run(study, study.company("YETI"), as_of=date(2024, 6, 30), scorer="lexicon")
+    products = pd.DataFrame({"ticker": "YETI", "brand": "YETI", "asin": ["BIG", "SMALL", "SEED"],
+                             "parent_asin": ["BIG", "SMALL", "SEED"], "rating_number": ["900", "5", ""],
+                             "source": ["mcauley2023:x", "mcauley2023:x", "manual:seed_asins.csv"]})
+    products.to_csv(run.dir / "products.csv", index=False)
+    assert run.tracked_products(top=2)["asin"].tolist() == ["SEED", "BIG"]
+
+    rows = []
+    for k, d in enumerate(pd.date_range("2021-01-15", "2023-09-10", freq="7D")):
+        for asin in ("BIG", "SMALL"):
+            rows.append({"review_id": f"{asin}{k}", "asin": asin, "parent_asin": asin,
+                         "review_date": d.strftime("%Y-%m-%d"), "rating": 5, "title": "Great", "text": "works",
+                         "source": "mcauley2023:x"})
+    from reviewtone import reviews as rv
+    rv.append_new(run.dir / "reviews.csv", pd.DataFrame(rows))
+    study.raw["apify"]["top_products"] = 2
+    run.score()
+    run.note("backfill_mcauley", dataset_end="2023-09-10")
+    q = run.aggregate(write=False).set_index("fiscal_quarter")
+    assert q.loc["FY22Q1", "n_reviews"] == 12           # one per week from BIG only; SMALL is not tracked
+    assert q.loc["FY23Q3", "partial_coverage"]          # dataset ends mid-quarter
+    assert not q.loc["FY23Q2", "partial_coverage"]
+    assert not q["usable"].loc["FY23Q3":].any()
