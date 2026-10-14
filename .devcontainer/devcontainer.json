@@ -1,0 +1,11 @@
+{
+  "name": "reviewtone",
+  "image": "mcr.microsoft.com/devcontainers/python:3.13",
+  "hostRequirements": { "cpus": 2, "memory": "8gb" },
+  "postCreateCommand": "pip install --progress-bar off -e '.[dev]' && pytest -q",
+  "secrets": {
+    "ANTHROPIC_API_KEY": { "description": "Claude API key for tone scoring (console.anthropic.com)" },
+    "APIFY_TOKEN": { "description": "Apify API token for live Amazon reviews" },
+    "SEC_USER_AGENT": { "description": "Your name and email, e.g. 'Jane Doe jane@example.com' (SEC asks for a contact)" }
+  }
+}

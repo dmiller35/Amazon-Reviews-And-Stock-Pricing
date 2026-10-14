@@ -72,6 +72,12 @@ it keeps the existing `.env`. `reviewtone` loads `.env` by itself.
 
 Then `source .venv/bin/activate` and:
 
+**No Linux machine, or WSL keeps crashing?** Use GitHub Codespaces: on the repo
+page choose **Code → Codespaces → Create codespace on this branch**. The included
+`.devcontainer` installs everything and runs the tests. Add `ANTHROPIC_API_KEY`,
+`APIFY_TOKEN` and `SEC_USER_AGENT` as Codespaces secrets (GitHub → Settings →
+Codespaces → Secrets), then run the commands below in its terminal.
+
 ## Running it
 
 ```bash
