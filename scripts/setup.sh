@@ -28,7 +28,23 @@ if [ "$mem_mb" -gt 0 ] && [ $((mem_mb + swap_mb)) -lt 3500 ]; then
   echo "then run 'wsl --shutdown' in PowerShell and reopen Ubuntu."
 fi
 
-say "Installing into .venv with $($PY --version)"
+# Python 3.14 is very new: Ubuntu 26.04's 3.14.4 crashed with interpreter memory
+# corruption ("SystemError: null argument to internal routine", then a segfault)
+# during backfill. Use a uv-managed Python 3.13 instead when only 3.14+ exists.
+if "$PY" -c 'import sys; sys.exit(sys.version_info < (3, 14))'; then
+  say "Found $($PY --version); installing a separate Python 3.13 for this project with uv"
+  if ! command -v uv >/dev/null 2>&1; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
+  if [ -x .venv/bin/python ] && ! .venv/bin/python -c 'import sys; sys.exit(sys.version_info >= (3, 14))'; then
+    echo "Removing the old Python 3.14 environment (.venv)"
+    rm -rf .venv
+  fi
+  [ -d .venv ] || uv venv --quiet --python 3.13 --seed .venv
+fi
+
+say "Installing into .venv with $(.venv/bin/python --version 2>/dev/null || $PY --version)"
 [ -d .venv ] || "$PY" -m venv .venv
 .venv/bin/python -m pip install --progress-bar off --upgrade pip | tail -1
 if .venv/bin/python -m pip install --progress-bar off -e '.[dev]' > .venv/install.log 2>&1; then
