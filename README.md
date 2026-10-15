@@ -51,6 +51,7 @@ anticipate a company's revenue and its stock's reaction to earnings. It implemen
 | Only **negative** swings produce calls (`call_positive_swings: false`) | Tables 9–11: positive swings predicted nothing. |
 | Revenue "as first reported", Q4 derived from the 10-K | No look-ahead from restatements. |
 | No I/B/E/S consensus, so no earnings-surprise regression | Not freely available. The announcement return captures the market's surprise instead. |
+| Tone compared on **matched products** across a quarter and its baseline | Live scraping can't reach back to 2023 for busy products; comparing only products with complete reviews in both keeps a missing product from looking like a tone change. With complete history (the backtest) every tracked product is used, as in the paper. |
 | Per-company pre-registration lock | Companies can be added at any time, but once a company has results it can't be edited or dropped, and the rules can't change. That enforces "never select companies after results". |
 
 ## Setup (your computer, one command)
@@ -81,16 +82,22 @@ Codespaces → Secrets), then run the commands below in its terminal.
 ## Running it
 
 ```bash
-reviewtone backfill --all          # 1. history 2018-Sep 2023: products.csv + reviews.csv for every company
-                                   #    (streams ~42 GB once, resumable; 1-2 hours; free)
-reviewtone check-live --all        # 2. which top products are still sold (~3 reviews each on Apify, ~$1)
-reviewtone score --all --scorer claude --sample 1000   # 3. Claude (Haiku) labels 1,000 reviews per company
-reviewtone run --all               # 4. Naive Bayes learns from those labels and scores everything (free),
-                                   #    then quarters, charts, SEC join, held-out eval, prediction, report
-reviewtone portfolio               # 5. long/short portfolio across companies
-reviewtone fetch --ticker LOGI --source apify   # 6. recent reviews (Apify, paid: up to 10 products
-                                   #    x 5 stars x 100 = 5,000 reviews, at most $9 per company)
+reviewtone backfill --all          # 1. history 2018-Sep 2023 (free; ~42 GB streamed, resumable)
+reviewtone check-live --all        # 2. which top products are still sold (Apify, ~$0.05-0.15 per company)
+reviewtone estimate --all          # 3. free: expected costs per company and when live calls can start
+reviewtone score --all --scorer claude --sample 1000   # 4. Claude Haiku labels 1,000 reviews per company
+                                   #    (Anthropic, ~$0.05 per company; running cost is printed)
+reviewtone run --all               # 5. Naive Bayes scores everything (free), then quarters, charts,
+                                   #    SEC revenue, held-out evaluation, prediction, report
+reviewtone portfolio               # 6. long/short portfolio across companies (needs 4+ companies)
+reviewtone update                  # 7. live reviews from Apify (first fetch, then weekly or every 4 weeks)
 ```
+
+Tested end to end on 2026-10-15 with real data for five companies (Turtle Beach,
+YETI, Corsair, Logitech, ACCO): every step above ran against the real sources.
+The one exception was the Claude call itself, run through the real SDK against a local stand-in API
+because no key was available in the test environment. Measured Apify prices: $0.0018 per review
+returned; checks that return nothing are free; there is no per-run fee.
 
 `backfill` only scans the categories listed in each company's file
 (`mcauley_categories`), streaming each category once for all companies. It
@@ -137,26 +144,43 @@ How it is used:
   with nothing in the last 120 days are marked `live=False` and replaced by the
   next most-reviewed product. Every tracked product therefore has both historical
   and current reviews.
-- **Weekly requests follow each product's review rate.** This actor has no date
+- **Requests follow each product's review rate.** This actor has no date
   filter, so every run pays for the newest N reviews per star. N is sized to
-  about 1.5× the reviews expected since the last fetch: about 40 five-star
-  reviews for a busy tumbler, 5 for a quiet star.
+  about 1.5× the reviews expected since the last fetch (minimum 2), and a star
+  whose list fills before reaching the stored reviews is topped up. The first
+  fetch reaches back to the 2023 history only for products where that can work;
+  for the rest it collects the current quarter.
 - **Only each company's 10 most-reviewed live products are followed**
   (`apify.top_products`).
 
-Rough cost with 15 companies × 10 products: the first fetch is at most 5 stars ×
-100 reviews × $0.0018 per product (about $135 in total, usually less), then about
-$10–15 a week. Apify's free plan includes only a small monthly credit; check your
-Apify billing page and set a spending limit.
+**What live data costs and when it pays off.** Run `reviewtone estimate --all`
+after `check-live`: it reads your own data and prints, per company, the first
+live fetch, the monthly cost with weekly or 4-weekly updates, and the first
+quarter a live call is possible. For the five test companies it estimated $4.90
+for the first fetch, then about $7.40 a month with weekly updates or $3.40 every
+4 weeks. Updating every 4 weeks catches the same reviews, because request sizes
+follow the time since the last fetch, and it pays the per-product minimum less
+often. Products with more than about 3 reviews a day at one star level should
+stay weekly.
 
-The catch is depth: popular products still only reach back weeks or months, and
-AbnormalTone needs the four quarters before the signal quarter as its baseline.
-When a fetch hits the per-product cap, any window between the reviews already
-stored and the oldest one fetched is recorded as a gap in `coverage.csv`. Quarters
-that overlap a gap, or whose baseline does, are marked `partial_coverage` /
-`partial_baseline` and never used for calls. Fetches that overlap stored reviews,
-like a normal weekly update, leave no gap. So history grows forward on its own,
-and the first fetch already reaches as far back as the actor allows.
+**Why live calls take about five quarters.** The scraper only returns each
+product's newest ~100 reviews per star, and the free history ends in September
+2023. A product busy enough to matter can't be bridged across that gap: its 100
+newest five-star reviews may span only a few months. Such a product rejoins the
+tone measure once five complete quarters (a signal quarter and its four-quarter
+baseline) have been collected. Tone is compared on **matched products**: each
+quarter is compared with its baseline using only products with complete reviews
+in all five quarters, so a missing product never looks like a change in tone.
+Quiet products that can be bridged are fetched back to 2023 (top-ups chase the
+gap only when that can close it), but they rarely have enough reviews for a call on
+their own. Expect the first live calls about five quarters after you start
+collecting. Until then, the historical backtest and the portfolio are the results.
+
+How gaps are recorded: when a fetch is cut off before it reaches the reviews
+already stored, the window in between is recorded in `coverage.csv`, and a
+product with a gap is left out of the quarters it touches. Weekly updates that
+overlap what is stored leave no gap; if a week is busier than expected, that star
+is topped up to the full 100 first.
 For a multi-year backtest without waiting, use the
 McAuley Lab **Amazon Reviews 2023** dataset (reviews through Sep 2023; the paper used
 the same lab's earlier release):
@@ -221,8 +245,9 @@ With 15 firms the portfolio uses quartiles, as in the paper.
 
 ## Weekly updates
 
-`scripts/weekly_update.sh` (cron example inside) runs `reviewtone update`. It fetches
-the newest reviews for every catalogued product, scores only reviews not yet scored,
+`scripts/weekly_update.sh` (cron example inside) runs `reviewtone update`. Run it weekly,
+or every 4 weeks to roughly halve the Apify cost (see `reviewtone estimate`). It fetches
+the newest reviews for every tracked product, scores only reviews not yet scored,
 re-evaluates, rebuilds reports, and snapshots `quarterly.csv`, `prediction.json`,
 `evaluation.json` and `status.json` into `research/<TICKER>/history/<date>/`.
 `reviews.csv` and `scores.csv` are append-only.
