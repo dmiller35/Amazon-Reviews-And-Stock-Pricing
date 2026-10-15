@@ -4,6 +4,7 @@ import json
 from datetime import date
 
 import numpy as np
+import pytest
 import pandas as pd
 
 from reviewtone import portfolio
@@ -101,6 +102,44 @@ def test_backfill_streams_category_once_for_several_companies(study, tmp_path, m
     again = backfill(study, ["YETI", "HELE"], categories=["Sports_and_Outdoors"])  # idempotent
     assert again["YETI"]["reviews_added"] == 0 and again["HELE"]["reviews_added"] == 0
     assert len(pd.read_csv(study.ticker_dir("YETI") / "reviews.csv")) == 1
+
+
+def test_backfill_resumes_after_interruption(study, tmp_path, monkeypatch):
+    import gzip
+
+    from reviewtone.pipeline import backfill
+
+    def write(name, rows):
+        with gzip.open(tmp_path / name, "wt") as f:
+            f.write("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    write("meta_A.jsonl.gz", [{"parent_asin": "P1", "store": "YETI", "title": "Tumbler"}])
+    write("meta_B.jsonl.gz", [{"parent_asin": "P2", "store": "YETI", "title": "Cooler"}])
+    write("A.jsonl.gz", [{"parent_asin": "P1", "asin": "P1", "timestamp": 1_600_000_000_000, "rating": 5.0,
+                          "title": "Great", "text": "Keeps ice", "verified_purchase": True}])
+    write("B.jsonl.gz", [{"parent_asin": "P2", "asin": "P2", "timestamp": 1_650_000_000_000, "rating": 2.0,
+                          "title": "Leaks", "text": "Drain plug leaks", "verified_purchase": True}])
+    scanned = []
+
+    def urls(cat):
+        scanned.append(cat)
+        if cat == "B" and len(scanned) == 2:
+            raise KeyboardInterrupt  # machine switched off mid-run
+        return str(tmp_path / f"meta_{cat}.jsonl.gz"), str(tmp_path / f"{cat}.jsonl.gz")
+
+    monkeypatch.setattr("reviewtone.sources.mcauley.category_urls", urls)
+    with pytest.raises(KeyboardInterrupt):
+        backfill(study, ["YETI"], categories=["A", "B"])
+    assert len(pd.read_csv(study.ticker_dir("YETI") / "reviews.csv")) == 1  # A was saved
+
+    out = backfill(study, ["YETI"], categories=["A", "B"])
+    assert scanned == ["A", "B", "B"]  # A is not streamed again
+    assert out["YETI"]["skipped"] == ["A"] and out["YETI"]["reviews_added"] == 1
+    assert len(pd.read_csv(study.ticker_dir("YETI") / "reviews.csv")) == 2
+
+    backfill(study, ["YETI"], categories=["A", "B"], restart=True)
+    assert scanned[-2:] == ["A", "B"]
+    assert len(pd.read_csv(study.ticker_dir("YETI") / "reviews.csv")) == 2
 
 
 def test_tracked_products_scope_and_dataset_end(study):

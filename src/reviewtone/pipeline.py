@@ -336,53 +336,74 @@ class Run:
 
 
 def backfill(study: Study, tickers: list[str], categories: list[str] | None = None,
-             chunk: int = 50_000) -> dict[str, dict]:
+             chunk: int = 50_000, restart: bool = False) -> dict[str, dict]:
     """Historical reviews from Amazon Reviews 2023 (through Sep 2023).
 
     Each category file is streamed once for every company that sells in it;
     products go to products.csv and reviews to reviews.csv (append-only).
+    Reviews are saved after every category and finished categories are
+    recorded in status.json, so an interrupted backfill resumes at the
+    category it was on (restart=True rescans everything).
     """
     from .sources import mcauley
 
     companies = [study.company(t) for t in tickers]
+    runs = {c.ticker: Run(study, c) for c in companies}
+    done = {t: set() if restart else set(r._status().get(DONE_KEY, {}).get("categories", []))
+            for t, r in runs.items()}
     by_cat: dict[str, list[Company]] = {}
+    summary = {t: {"products": 0, "reviews_streamed": 0, "reviews_added": 0, "categories": [],
+                   "skipped": [], "errors": []} for t in runs}
     for c in companies:
         for cat in categories or c.mcauley_categories:
-            by_cat.setdefault(cat, []).append(c)
-    runs = {c.ticker: Run(study, c) for c in companies}
+            if cat in done[c.ticker]:
+                summary[c.ticker]["skipped"].append(cat)
+            else:
+                by_cat.setdefault(cat, []).append(c)
     tmp = {t: r.dir / "_backfill.csv" for t, r in runs.items()}
-    for p in tmp.values():
-        p.unlink(missing_ok=True)
-    summary = {t: {"products": 0, "reviews_streamed": 0, "categories": [], "errors": []} for t in runs}
-    for cat, cos in by_cat.items():
-        print(f"{cat}: scanning for {', '.join(c.ticker for c in cos)}", flush=True)
+    for i, (cat, cos) in enumerate(by_cat.items(), 1):
+        for p in tmp.values():
+            p.unlink(missing_ok=True)  # partial rows from an interrupted category
+        print(f"[{i}/{len(by_cat)}] {cat}: scanning for {', '.join(c.ticker for c in cos)}", flush=True)
         try:
             products, rows = mcauley.scan_category(cat, cos, runs[cos[0].ticker].log)
-            for t, prods in products.groupby("ticker") if len(products) else []:
-                old = runs[t].dir / "products.csv"
-                merged, _ = catalog.merge_products(prods, pd.read_csv(old, dtype=str) if old.exists() else None)
-                merged.to_csv(old, index=False)
-                summary[t]["products"] += len(prods)
             buf: list[dict] = []
             for row in rows:
                 buf.append(row)
                 if len(buf) >= chunk:
                     _flush(buf, tmp, summary)
             _flush(buf, tmp, summary)
-            for c in cos:
-                summary[c.ticker]["categories"].append(cat)
         except SourceUnavailable as e:
             for c in cos:
                 summary[c.ticker]["errors"].append(f"{cat}: {e}")
+            continue
+        # The category streamed completely: save it before starting the next one.
+        for c in cos:
+            t, run = c.ticker, runs[c.ticker]
+            prods = products[products["ticker"] == t] if len(products) else products
+            if len(prods):
+                old = run.dir / "products.csv"
+                merged, _ = catalog.merge_products(prods, pd.read_csv(old, dtype=str) if old.exists() else None)
+                merged.to_csv(old, index=False)
+                summary[t]["products"] += len(prods)
+            if tmp[t].exists():
+                summary[t]["reviews_added"] += len(rv.append_new(run.dir / "reviews.csv",
+                                                                 pd.read_csv(tmp[t], dtype=str)))
+                tmp[t].unlink()
+            summary[t]["categories"].append(cat)
+            done[t].add(cat)
+            run.note(DONE_KEY, categories=sorted(done[t]))
+        print("    saved: " + ", ".join(f"{c.ticker} +{summary[c.ticker]['reviews_added']}" for c in cos),
+              flush=True)
     for t, run in runs.items():
-        added = rv.append_new(run.dir / "reviews.csv", pd.read_csv(tmp[t], dtype=str)) if tmp[t].exists() else []
-        tmp[t].unlink(missing_ok=True)
-        summary[t]["reviews_added"] = len(added)
         stored = rv.load(run.dir / "reviews.csv")
-        hist = stored[stored["source"].astype(str).str.startswith("mcauley")]
+        hist = stored[stored["source"].astype(str).str.startswith("mcauley")] if len(stored) else stored
         summary[t]["dataset_end"] = hist["review_date"].max() if len(hist) else None
         run.note("backfill_mcauley", **summary[t])
     return summary
+
+
+DONE_KEY = "backfill_categories_done"
 
 
 def _flush(buf: list[dict], tmp: dict[str, Path], summary: dict) -> None:

@@ -66,6 +66,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("backfill", help="historical reviews (2018-Sep 2023) from Amazon Reviews 2023")
     company_args(p)
     p.add_argument("--categories", nargs="*", help="override the categories in the company config")
+    p.add_argument("--restart", action="store_true",
+                   help="rescan every category (by default finished categories are skipped, so a rerun resumes)")
 
     p = sub.add_parser("verify", help="step 1: check CIK, name and fiscal year end on SEC EDGAR")
     company_args(p)
@@ -118,8 +120,9 @@ def main(argv: list[str] | None = None) -> int:
         return _add_company(study, args)
     if args.cmd == "backfill":
         from .pipeline import backfill
-        for t, info in backfill(study, _tickers(study, args), args.categories).items():
+        for t, info in backfill(study, _tickers(study, args), args.categories, restart=args.restart).items():
             print(f"{t}: {info['products']} products, {info['reviews_added']} reviews added"
+                  + (f", already done: {', '.join(info['skipped'])}" if info["skipped"] else "")
                   + (f", errors: {info['errors']}" if info["errors"] else ""))
         return 0
     if args.cmd == "verify":

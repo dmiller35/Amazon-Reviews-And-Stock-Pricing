@@ -92,7 +92,10 @@ reviewtone run --all && reviewtone portfolio                       # 5. every co
 ```
 
 `backfill` only scans the categories listed in each company's file
-(`mcauley_categories`), streaming each category once for all companies. The
+(`mcauley_categories`), streaming each category once for all companies. It
+saves after every category, so if it is interrupted (computer off, Codespace
+stopped) just run the same command again: finished categories are skipped and
+it picks up at the one it was on. `--restart` rescans everything. The
 prompt's step-by-step commands (`verify`, `catalog`, `fetch`, `score`) also work
 on their own. Each step records what limited it, so a blocked source shows up in
 the report's Limitations section and isn't papered over.
