@@ -212,20 +212,45 @@ def test_coverage_gaps_only_flag_missing_windows(study):
     run._record_coverage("A1", capped.iloc[10:].reset_index(drop=True), True, "2026-05-11", stored_newest="2026-08-08")
     # A product with no history whose fetch did not hit the cap is complete: no gap.
     run._record_coverage("B2", capped.iloc[:20], False, None, stored_newest=None)
-    gaps = aggregate.coverage_gaps(pd.read_csv(run.dir / "coverage.csv"))
-    assert gaps == [(date(2023, 9, 28), date(2026, 5, 1))]
+    cov = pd.read_csv(run.dir / "coverage.csv")
+    today = pd.Timestamp(cov["fetched_at"].max()).tz_convert(None).date()
+    gaps = aggregate.coverage_gaps(cov, ["A1", "B2", "C3"], dataset_end="2023-09-28")
+    assert gaps["A1"] == [(date(2023, 9, 28), date(2026, 5, 1)), (today, date.max)]  # + not collected since last fetch
+    assert gaps["B2"] == [(today, date.max)]
+    assert gaps["C3"] == [(date(2023, 9, 28), date.max)]  # never fetched live: nothing after the dataset
 
-    rows = [{"review_id": f"{d}-{i}", "review_date": d, "rating": 4.0, "tone": 0.5, "tags": "",
-             "seller_shipping_only": False}
-            for d in pd.date_range("2022-01-15", "2027-12-15", freq="MS").strftime("%Y-%m-%d") for i in range(15)]
-    q = aggregate.quarterly_measures(pd.DataFrame(rows), LOGI, min_reviews=30, as_of=date(2027, 12, 31), gaps=gaps)
+    # Two products, 15 reviews a month each; A1 has the hole above, B2 is complete.
+    rows = [{"review_id": f"{prod}{d}-{i}", "review_date": d, "rating": 4.0, "tone": tone, "tags": "",
+             "seller_shipping_only": False, "product": prod}
+            for prod, tone in (("A1", 1.0), ("B2", 0.0))
+            for d in pd.date_range("2022-01-15", "2027-12-15", freq="MS").strftime("%Y-%m-%d") for i in range(15)
+            if not (prod == "A1" and "2023-09-28" < d < "2026-05-01")]
+    hole = {"A1": [(date(2023, 9, 28), date(2026, 5, 1))]}
+    q = aggregate.quarterly_measures(pd.DataFrame(rows), LOGI, min_reviews=30, as_of=date(2027, 12, 31), gaps=hole)
     flags = q.set_index("fiscal_quarter")
     assert not flags.loc["FY24Q1", "partial_coverage"]          # Apr-Jun 2023: before the gap
     assert flags.loc["FY24Q2", "partial_coverage"]              # Jul-Sep 2023: gap starts
     assert flags.loc["FY27Q1", "partial_coverage"]              # Apr-Jun 2026: gap ends inside
     assert not flags.loc["FY27Q2", "partial_coverage"]          # Jul-Sep 2026: complete again
     assert flags.loc["FY28Q1", "partial_baseline"]              # baseline still reaches into the gap
+    # Matched products: while A1 is missing, B2 is compared with its own baseline, so A1's
+    # absence is not mistaken for a drop in tone (unmatched, mean tone falls from 0.5 to 0.0).
+    gap_q = flags.loc["FY25Q1"]
+    assert gap_q["n_products_excluded"] == 1 and gap_q["n_reviews"] == 45
+    assert gap_q["AbnormalTone"] == pytest.approx(0.0) and gap_q["usable"]
+    assert flags.loc["FY24Q1", "n_products_excluded"] == 0 and flags.loc["FY24Q1", "n_reviews"] == 90
+    assert flags.loc["FY28Q3", "n_products_excluded"] == 0 and flags.loc["FY28Q3", "usable"]
+
+    # If the products without a hole are too thin, the quarter is not callable until the hole is behind it.
+    q = aggregate.quarterly_measures(pd.DataFrame(rows), LOGI, min_reviews=60, as_of=date(2027, 12, 31), gaps=hole)
+    flags = q.set_index("fiscal_quarter")
+    assert not flags.loc["FY25Q1", "usable"] and not flags.loc["FY28Q1", "usable"]
     assert flags.loc["FY28Q3", "usable"]                        # four clean quarters later: callable
+
+    # A hole for every product (key None) leaves nothing to compare.
+    q = aggregate.quarterly_measures(pd.DataFrame(rows), LOGI, min_reviews=30, as_of=date(2027, 12, 31),
+                                     gaps={None: [(date(2023, 9, 28), date.max)]})
+    assert not q.set_index("fiscal_quarter").loc["FY25Q1":, "usable"].any()
 
 
 def test_axesso_profile_star_filters_and_truncation():
@@ -406,8 +431,9 @@ def test_request_sizes_follow_review_rate(study):
     mine = pd.DataFrame(rows).assign(source="apify:x", fetched_at="2026-10-07T06:00:00Z")
     sizes = run._request_sizes(mine, 100)
     assert 25 <= sizes[5] <= 35       # ~9 days x 2/day x 1.5 + margin
-    assert sizes[1] == 5 and sizes[3] == 5   # rare stars: minimum request
-    assert run._request_sizes(mine.iloc[0:0], 100) == 100  # first live fetch: full depth
+    assert sizes[1] == 4                     # ~1 a week: 9 days x 1/7 x 1.5 -> 2, + margin 2
+    assert sizes[3] == 2                     # no three-star reviews: minimum request
+    assert run._request_sizes(mine.iloc[0:0], 100) == 100  # first live fetch, no history: full depth
     # a truncated list (20 five-star reviews in the last 5 days) must read as ~4/day, not 20/180
     busy = pd.DataFrame({"rating": [5] * 20 + [1] * 20,
                          "review_date": [f"2026-10-0{3 + i % 5}" for i in range(20)]
@@ -486,3 +512,81 @@ def test_claude_scorer_through_real_sdk_http(monkeypatch):
     assert out.set_index("review_id")["tone_raw"].to_dict() == {"a": 2, "b": -2, "c": 2}
     assert scorer.tokens == {"input": 2000, "output": 800}
     assert abs(scorer.cost() - (2000 * 0.10 + 800 * 0.50) / 1e6) < 1e-12
+
+
+def test_first_fetch_bridges_quiet_products_and_only_collects_this_quarter_for_busy_ones(study):
+    from reviewtone.pipeline import Run, first_fetch_sizes
+
+    run = Run(study, study.company("YETI"), as_of=date(2026, 10, 15))
+    year = pd.date_range("2022-09-08", "2023-09-07", freq="D")
+    # Quiet product: ~6 reviews a year per star -> ~18 per star in the 3 years since: bridgeable.
+    quiet = pd.DataFrame({"rating": [s for s in range(1, 6) for _ in range(6)],
+                          "review_date": [year[i * 60].strftime("%Y-%m-%d") for _ in range(1, 6) for i in range(6)]})
+    sizes, bridges = first_fetch_sizes(quiet, date(2026, 10, 15), date(2026, 10, 1), 100)
+    assert bridges and all(20 <= n < 100 for n in sizes.values())
+    # Busy product: 0.6 five-star reviews a day -> 100 cover ~165 days: a gap is unavoidable,
+    # so the first fetch only reaches back to the start of the current quarter (Oct 1).
+    busy = pd.DataFrame({"rating": 5, "review_date": year.strftime("%Y-%m-%d")})
+    busy = pd.concat([busy, busy.sample(frac=0.6, random_state=1)], ignore_index=True)  # ~1.6 a day
+    sizes, bridges = first_fetch_sizes(busy, date(2026, 10, 15), date(2026, 10, 1), 100)
+    assert not bridges
+    assert 30 <= sizes[5] <= 50 and sizes[1] == 5   # ~1.6/day x 16 days x 1.5 + 5
+    # Through the Run: no live reviews stored yet -> first-fetch sizing from the history.
+    assert run._request_sizes(busy.assign(source="mcauley2023:x"), 100) == sizes
+
+
+def test_fetch_tops_up_a_busy_star_and_judges_truncation_on_raw_counts(monkeypatch):
+    from reviewtone.sources import apify
+
+    monkeypatch.setenv("APIFY_TOKEN", "t")
+    client = apify.ApifyReviews()
+    calls = []
+
+    def item(star, day, country="the United States"):
+        return {"asin": "A", "rating": star, "title": "t", "text": f"{star}-{day}", "body": f"{star}-{day}",
+                "published_date": f"2026-10-{day:02d}", "review_origin_country": country}
+
+    def run(payload, **kw):
+        star = {"one_star": 1, "two_star": 2, "three_star": 3, "four_star": 4, "five_star": 5}[payload["starFilter"]]
+        n = payload["maxReviewsPerAsin"]
+        calls.append((star, n))
+        if star == 5:  # a busy week: 12 new five-star reviews since the 1st
+            return [item(5, 14 - i // 2) for i in range(min(n, 12))] + [item(5, 1)] * max(0, min(n, 20) - 12)
+        if star == 1:  # newest one-star review is from Canada, then an old US one
+            return [item(1, 13, "Canada"), item(1, 2)][:n]
+        return [item(star, 1)][:n]
+
+    monkeypatch.setattr(client, "run", run)
+    sizes = {1: 2, 2: 2, 3: 2, 4: 2, 5: 5}
+    res = client.fetch("A", ticker="T", brand="B", max_reviews=sizes, back_to="2026-10-03", top_up=100)
+    assert calls[:5] == [(1, 2), (2, 2), (3, 2), (4, 2), (5, 5)]
+    assert calls[5] == (5, 100)                     # five-star list filled before reaching back: topped up
+    assert (res.reviews["rating"] == 5).sum() == 20
+    assert "1-13" not in set(res.reviews["text"])  # the Canadian review is dropped
+    # One-star: 2 raw items requested and returned (one Canadian, dropped) -> truncated, reaches back to the 2nd.
+    assert res.hit_cap and res.complete_from == "2026-10-02"
+
+
+def test_fetch_plan_chases_history_only_when_it_can_be_bridged(study):
+    from reviewtone.pipeline import Run
+
+    run = Run(study, study.company("YETI"), as_of=date(2026, 10, 15))
+    year = pd.date_range("2021-09-08", "2023-09-07", freq="D")
+    busy = pd.DataFrame({"rating": 5, "review_date": year.strftime("%Y-%m-%d"), "source": "mcauley2023:x"})
+    sizes, back_to = run._fetch_plan(busy, 100)
+    assert back_to == "2026-10-01"          # can't bridge 3 years of ~1/day: only this quarter
+    quiet = busy.iloc[::120]
+    sizes, back_to = run._fetch_plan(quiet, 100)
+    assert back_to == quiet["review_date"].max()   # bridgeable: reach back to the newest stored review
+    live = pd.concat([busy, busy.tail(3).assign(source="apify:x", review_date="2026-10-10",
+                                                  fetched_at="2026-10-11T00:00:00Z")])
+    assert run._fetch_plan(live, 100)[1] == "2026-10-10"   # weekly: newest stored
+
+
+def test_history_rates_skip_the_thin_end_of_the_dataset():
+    from reviewtone.pipeline import history_rates
+
+    full = pd.date_range("2021-01-01", "2023-03-08", freq="D")  # 1 a day ...
+    thin = pd.date_range("2023-03-09", "2023-09-07", freq="10D")  # ... then the crawl thins out
+    mine = pd.DataFrame({"rating": 5, "review_date": [d.strftime("%Y-%m-%d") for d in full.append(thin)]})
+    assert history_rates(mine)[5] == pytest.approx(1.0, abs=0.02)

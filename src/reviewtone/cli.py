@@ -89,6 +89,9 @@ def main(argv: list[str] | None = None) -> int:
     company_args(p)
     p.add_argument("--top", type=int, help="live products wanted per company (default: config apify.top_products)")
 
+    p = sub.add_parser("estimate", help="free: expected Apify and Claude costs and the first live call, per company")
+    company_args(p)
+
     p = sub.add_parser("score", help="step 4: score tone of unscored reviews")
     company_args(p)
     p.add_argument("--scorer", choices=["claude", "naive_bayes", "lexicon"])
@@ -155,6 +158,11 @@ def main(argv: list[str] | None = None) -> int:
                   f"({info['apify_checks']} Apify checks, {info['skipped_inactive_in_history']} skipped for free "
                   "as already retired in the history)\n", flush=True)
         print(f"Done. {runs} Apify checks, about ${runs * 3 * price:.2f} of Apify credit.")
+    elif args.cmd == "estimate":
+        from . import estimate
+        rows = [estimate.company(Run(study, study.company(t), as_of=as_of)) for t in _tickers(study, args)]
+        print(estimate.as_of_note(as_of))
+        print(estimate.table(rows))
     elif args.cmd == "score":
         for t in _tickers(study, args):
             run = Run(study, study.company(t), as_of=as_of, scorer=args.scorer)

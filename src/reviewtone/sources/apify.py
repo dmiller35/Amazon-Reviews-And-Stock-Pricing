@@ -305,17 +305,49 @@ class ApifyReviews:
         return df["review_date"].max() if len(df) else None
 
     def fetch(self, asin: str, *, ticker: str, brand: str, max_reviews: int | dict[int, int] = 100,
-              since: str | None = None, timeout_s: int = 900) -> FetchResult:
-        """Newest reviews of one product. max_reviews applies per star filter for star-filtered actors."""
+              since: str | None = None, timeout_s: int = 900, back_to: str | None = None,
+              top_up: int | None = None) -> FetchResult:
+        """Newest reviews of one product. max_reviews applies per star filter for star-filtered actors.
+
+        back_to/top_up (star-split actors): if a star's list fills its request and still
+        doesn't reach back to `back_to` (the newest review already stored), that star is
+        asked again with `top_up` reviews, so a busier week than expected doesn't open a gap.
+        """
         if not self.token:
             raise SourceUnavailable("APIFY_TOKEN is not set; cannot run the Apify review scraper.")
-        items: list[dict[str, Any]] = []
-        for payload in self.profile.payloads(asin, max_reviews, since):
-            items.extend(self.run(payload, asin=asin, timeout_s=timeout_s))
+        payloads = self.profile.payloads(asin, max_reviews, since)
+        batches = [self.run(payload, asin=asin, timeout_s=timeout_s) for payload in payloads]
+        split = self.profile.by_star and len(payloads) == len(STARS)
+        sizes = self.profile.cap(max_reviews)
+        size = (lambda star: sizes.get(star, max(sizes.values()))) if isinstance(sizes, dict) else (lambda star: sizes)
+        if split:
+            sizes = {star: size(star) for star in range(1, len(STARS) + 1)}
+            for i, batch in enumerate(batches):
+                star = i + 1
+                if not (back_to and top_up and len(batch) >= sizes[star] and sizes[star] < top_up):
+                    continue
+                d, _ = normalize_items(batch, ticker=ticker, brand=brand, fetched_at="")
+                if len(d) and d["review_date"].min() <= back_to:
+                    continue  # reached what is stored: complete
+                bigger = {**sizes, star: top_up}
+                batches[i] = self.run(self.profile.payloads(asin, bigger, since)[i], asin=asin, timeout_s=timeout_s)
+                sizes = {**sizes, star: self.profile.cap(bigger)[star]}
+                self.log.record(source="apify", kind="top_up", asin=asin, star=star, size=top_up)
+        items = [x for batch in batches for x in batch]
         df, unmapped = normalize_items(items, ticker=ticker, brand=brand, fetched_at=utcnow())
         if len(df):
             df["asin"] = df["asin"].fillna(asin)
-        hit_cap, complete_from = completeness(df, self.profile.cap(max_reviews), self.profile.by_star)
+        if split:
+            # Truncation is judged on the raw count per star: reviews from other
+            # marketplaces are dropped after, and must not make a cut list look complete.
+            cut = []
+            for i, batch in enumerate(batches):
+                if len(batch) >= sizes[i + 1]:
+                    d, _ = normalize_items(batch, ticker=ticker, brand=brand, fetched_at="")
+                    cut.append(d["review_date"].min() if len(d) else utcnow()[:10])
+            hit_cap, complete_from = bool(cut), (max(cut) if cut else None)
+        else:
+            hit_cap, complete_from = completeness(df, self.profile.cap(max_reviews), self.profile.by_star)
         self.log.record(source="apify", kind="coverage", asin=asin, reviews=len(df),
                         oldest=df["review_date"].min() if len(df) else None, hit_cap=hit_cap,
                         complete_from=complete_from)

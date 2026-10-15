@@ -9,6 +9,7 @@ data: no reviews -> no tone; no SEC access -> no outcomes; and so on.
 from __future__ import annotations
 
 import json
+import math
 import shutil
 from dataclasses import dataclass, field
 from datetime import date
@@ -139,8 +140,9 @@ class Run:
                         if not latest or latest < cutoff:
                             raise ProductUnavailable(f"{p.asin}: no reviews since {cutoff} (newest {latest}); "
                                                      "listing retired or reviews moved to a newer one")
-                    res = client.fetch(p.asin, ticker=self.company.ticker, brand=p.brand,
-                                       max_reviews=self._request_sizes(mine, max_reviews_per_product), since=since)
+                    sizes, back_to = self._fetch_plan(mine, max_reviews_per_product)
+                    res = client.fetch(p.asin, ticker=self.company.ticker, brand=p.brand, max_reviews=sizes,
+                                       since=since, back_to=back_to, top_up=max_reviews_per_product)
                 except ProductUnavailable as e:
                     _mark_live(products, p.asin, False)
                     errors.append(str(e))
@@ -166,18 +168,33 @@ class Run:
                   n_errors=len(errors), **({"error": errors[0]} if errors and not len(new) else {}))
         return len(added)
 
+    def _fetch_plan(self, mine: pd.DataFrame, cap: int) -> tuple[int | dict[int, int], str | None]:
+        """Request sizes and the date each star's list must reach back to (top-ups chase it).
+
+        Weekly: the newest stored review. First fetch: the end of the history if the
+        product can be bridged to it, else the start of the current quarter (a gap is
+        unavoidable then, and chasing 2023 would only buy reviews that can't close it).
+        """
+        newest = mine["review_date"].max() if len(mine) else None
+        if mine["source"].astype(str).str.startswith("apify").any() or not newest:
+            return self._request_sizes(mine, cap), newest
+        qstart = self.cal.quarter(self.as_of).start
+        sizes, bridges = first_fetch_sizes(mine, self.as_of, qstart, cap)
+        return sizes, (newest if bridges else qstart.isoformat())
+
     def _request_sizes(self, mine: pd.DataFrame, cap: int) -> int | dict[int, int]:
         """Per-star request sizes for a product already followed live.
 
         The scraper has no date filter, so each run pays for the newest N reviews
         per star even if they are already stored. Sizing N to the product's own
         recent review rate (1.5x the expected new reviews since the last fetch,
-        plus a margin) keeps weekly cost close to the number of truly new reviews,
-        while a list that still fills up is recorded as truncated, never hidden.
+        plus a margin) keeps weekly cost close to the number of truly new reviews;
+        a list that fills up anyway is topped up to the cap (ApifyReviews.fetch),
+        and one still truncated then is recorded as a gap, never hidden.
         """
         live = mine[mine["source"].astype(str).str.startswith("apify")]
         if live.empty:
-            return cap  # first live fetch: go as deep as allowed
+            return first_fetch_sizes(mine, self.as_of, self.cal.quarter(self.as_of).start, cap)[0]
         dates = pd.to_datetime(live["review_date"])
         stars = pd.to_numeric(live["rating"], errors="coerce").round()
         last = pd.to_datetime(live["fetched_at"], errors="coerce", utc=True).max()
@@ -190,7 +207,9 @@ class Run:
             # Rate over this star's own span: a list truncated at N reviews covers
             # a short span, so N / span is the true rate, not N / 180 days.
             rate = len(d) / max(2, (dates.max() - d.min()).days) if len(d) else 0.0
-            sizes[star] = int(min(cap, max(5, -(-rate * days * 1.5 // 1) + 3)))
+            # Small minimum: a quiet star costs 2 reviews a week; if more arrived than
+            # expected, the fetch tops that star up instead of leaving a gap.
+            sizes[star] = int(min(cap, max(2, math.ceil(rate * days * 1.5) + 2)))
         return sizes
 
     def check_live(self, top: int | None = None, workers: int = 2, progress: bool = True) -> dict:
@@ -391,14 +410,23 @@ class Run:
         if scope == "tracked" and len(tracked):
             ids = set(tracked["asin"]) | set(tracked["parent_asin"].dropna())
             reviews = reviews[reviews["asin"].isin(ids) | reviews["parent_asin"].isin(ids)]
+            prods = tracked
+        else:
+            path = self.dir / "products.csv"
+            prods = pd.read_csv(path, dtype=str) if path.exists() else pd.DataFrame(columns=catalog.PRODUCT_COLUMNS)
+        # Each review belongs to a catalogued product (matched by ASIN or parent ASIN).
+        key_of = {str(a): str(a) for a in prods["asin"]}
+        for a, pa in zip(prods["asin"], prods["parent_asin"]):
+            if isinstance(pa, str) and pa:
+                key_of.setdefault(pa, str(a))
+        own = reviews["parent_asin"].where(reviews["parent_asin"].astype(str) != "", reviews["asin"])
+        reviews = reviews.assign(product=reviews["parent_asin"].map(key_of)
+                                 .fillna(reviews["asin"].map(key_of)).fillna(own))
         scored = aggregate.attach_scores(reviews, self._scores())
         cov_path = self.dir / "coverage.csv"
-        coverage = pd.read_csv(cov_path) if cov_path.exists() else pd.DataFrame()
-        gaps = aggregate.coverage_gaps(coverage)
+        coverage = pd.read_csv(cov_path, dtype={"asin": str}) if cov_path.exists() else pd.DataFrame()
         dataset_end = self._status().get("backfill_mcauley", {}).get("dataset_end")
-        if dataset_end and coverage.empty:
-            # Historical data stops here and no live fetch has filled in after it.
-            gaps.append((date.fromisoformat(dataset_end), date.max))
+        gaps = aggregate.coverage_gaps(coverage, list(prods["asin"].astype(str)), dataset_end)
         q = aggregate.quarterly_measures(scored, cal or self.cal,
                                          min_reviews=self.study.aggregation["min_reviews_per_quarter"],
                                          as_of=self.as_of, gaps=gaps)
@@ -472,6 +500,50 @@ class Run:
             if (self.dir / name).exists():
                 shutil.copy2(self.dir / name, dest / name)
         return dest
+
+
+def history_rates(mine: pd.DataFrame) -> dict[int, float]:
+    """Reviews per day by star from a product's stored history.
+
+    The Amazon Reviews 2023 dataset thins out in its last months (its crawl
+    lags), so rates come from the year ending six months before the newest
+    stored review, or the last year when the history is shorter than that.
+    """
+    dates = pd.to_datetime(mine["review_date"])
+    stars = pd.to_numeric(mine["rating"], errors="coerce").round()
+    newest = dates.max()
+    end = newest - pd.Timedelta(days=183)
+    if dates.min() > end - pd.Timedelta(days=365):
+        end = newest
+    window = (dates > end - pd.Timedelta(days=365)) & (dates <= end)
+    return {s: float((window & (stars == s)).sum()) / 365 for s in range(1, 6)}
+
+
+def first_fetch_sizes(mine: pd.DataFrame, as_of: date, quarter_start: date,
+                      cap: int) -> tuple[int | dict[int, int], bool]:
+    """Per-star sizes for a product's first live fetch, and whether it bridges to the history.
+
+    The scraper returns only the newest `cap` reviews per star. Rates come from
+    the product's last year of stored (historical) reviews:
+    - if every star's reviews since the history ends fit within the cap, ask for
+      just enough to reach back to it (1.5x the expected count + 5): no gap;
+    - otherwise a gap is unavoidable (the product rejoins the tone measure after
+      five complete quarters, see aggregate), so only the current quarter is
+      collected: enough to reach back to its start, which makes it complete.
+    A product with no stored reviews gets the full cap.
+    """
+    if mine.empty:
+        return cap, False
+    rate = history_rates(mine)
+    newest = pd.to_datetime(mine["review_date"]).max()
+
+    def sizes(days: int) -> dict[int, int]:
+        return {s: int(min(cap, max(5, math.ceil(rate[s] * days * 1.5) + 5))) for s in range(1, 6)}
+
+    bridge = sizes(max(1, (pd.Timestamp(as_of) - newest).days + 2))
+    if all(n < cap for n in bridge.values()):
+        return bridge, True
+    return sizes(max(1, (pd.Timestamp(as_of) - pd.Timestamp(quarter_start)).days + 2)), False
 
 
 def _mark_live(products: pd.DataFrame, asin: str, live: bool) -> None:
@@ -627,6 +699,9 @@ def run_universe(study: Study, factors: pd.DataFrame | None, as_of: date | None 
         if len(q):
             charts.portfolio_cumulative(q, out_dir / "long_short.png")
         summary["alphas"] = alphas
+        if not alphas:
+            summary["note"] = (f"No calendar quarter had at least {portfolio.MIN_FIRMS} companies with a usable "
+                               "AbnormalTone and a finished holding quarter, so no portfolio could be formed yet.")
         if len(latest):
             k = int(latest["n_groups"].iloc[0])
             summary["latest_formation"] = {

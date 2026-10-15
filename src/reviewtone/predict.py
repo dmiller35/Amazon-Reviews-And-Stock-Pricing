@@ -22,10 +22,13 @@ def prediction_card(ticker: str, quarterly: pd.DataFrame, fundamentals: pd.DataF
         return {"ticker": ticker, "as_of": as_of.isoformat(), "status": "no completed quarter with reviews"}
     r = done.iloc[-1]
     call = make_call(r["AbnormalTone"], bool(r["usable"]), rules)
-    blockers = [name for name, flag in (("sparse quarter", r["sparse"]), ("sparse baseline", r["sparse_baseline"]),
-                                         ("partial review coverage", r["partial_coverage"]),
-                                         ("baseline has partial coverage", r["partial_baseline"]),
-                                         ("fewer than 4 prior quarters", pd.isna(r["AbnormalTone"]))) if flag]
+    excluded = int(r.get("n_products_excluded", 0) or 0)
+    # Every tracked product has a gap (typically: no live reviews fetched yet after the historical data).
+    nothing = excluded < 0 or (excluded > 0 and int(r["n_reviews"]) == 0)
+    blockers = [name for name, flag in (
+        ("no tracked product has complete reviews for this quarter and its baseline yet", nothing),
+        ("sparse quarter", r["sparse"] and not nothing), ("sparse baseline", r["sparse_baseline"] and not nothing),
+        ("fewer than 4 prior quarters", pd.isna(r["AbnormalTone"]) and not nothing)) if flag]
     card = {
         "ticker": ticker,
         "as_of": as_of.isoformat(),
@@ -38,6 +41,10 @@ def prediction_card(ticker: str, quarterly: pd.DataFrame, fundamentals: pd.DataF
         "call_text": CALL_TEXT[call],
         "blockers": blockers,
     }
+    if excluded > 0 and not nothing:
+        card["products_left_out"] = (f"{excluded} tracked product(s) have a gap in their reviews in this quarter "
+                                     "or its baseline; the call compares the remaining products with their own "
+                                     "four-quarter baseline")
     if fundamentals is not None and len(fundamentals):
         f = fundamentals.set_index("fq_index")
         reported = r["fq_index"] in f.index and pd.notna(f.loc[r["fq_index"], "revenue"])
