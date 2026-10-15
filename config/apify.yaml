@@ -42,3 +42,6 @@ live_window_days: 120
 # the actor returns nothing recent for it, the run stops instead of silently
 # storing empty results (a paid-only actor "succeeds" with zero reviews).
 check_asin: B07SGPJBZ6   # YETI Rambler 20 oz tumbler
+# Actor price per scraped review, used only for the cost estimates printed by
+# check-live (Apify charges your account's credit, console.apify.com/billing).
+price_per_review: 0.0018

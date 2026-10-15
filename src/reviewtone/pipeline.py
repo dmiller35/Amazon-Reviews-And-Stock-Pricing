@@ -131,7 +131,8 @@ class Run:
                 since = (pd.Timestamp(newest) - pd.Timedelta(days=7)).strftime("%Y-%m-%d") if newest else None
                 cutoff = (pd.Timestamp(self.as_of) - pd.Timedelta(days=window)).strftime("%Y-%m-%d")
                 try:
-                    if not (newest and newest >= cutoff):
+                    confirmed = str(getattr(p, "live", "")) == "True" and self._checked_within(p, 14)
+                    if not (newest and newest >= cutoff) and not confirmed:
                         # Cheap check before paying for a full fetch: is this
                         # listing still collecting reviews?
                         latest = client.newest_review(p.asin)
@@ -192,53 +193,153 @@ class Run:
             sizes[star] = int(min(cap, max(5, -(-rate * days * 1.5 // 1) + 3)))
         return sizes
 
-    def check_live(self, top: int | None = None) -> dict:
+    def check_live(self, top: int | None = None, workers: int = 2, progress: bool = True) -> dict:
         """Mark which of the most-reviewed products are still sold, without fetching them.
 
         Run this before the first `run`: the tracked products (the top N that
         are still live) decide which reviews the backtest uses, so they should
-        be fixed before results exist. Costs about 3 scraped reviews per product
-        checked.
+        be fixed before results exist.
+
+        Each check is a paid Apify run (about 3 reviews), and most of a
+        company's best sellers from 2018-2023 are no longer sold, so checks are
+        kept to plausible candidates:
+        - free pre-filter: a product with no review in the historical dataset's
+          last `history_active_days` was already retired by 2023;
+        - products checked in the last `recheck_days` reuse that result, so an
+          interrupted run resumes without paying twice;
+        - at most `max_live_checks` candidates per company.
+        Progress is saved after every batch of checks.
         """
+        from concurrent.futures import ThreadPoolExecutor
+
         from .sources.apify import ApifyReviews, ProductUnavailable, load_config, preflight
         path = self.dir / "products.csv"
         products = pd.read_csv(path, dtype=str) if path.exists() else pd.DataFrame(columns=catalog.PRODUCT_COLUMNS)
-        want = top or self.study.raw.get("apify", {}).get("top_products", 20)
+        for col in ("live", "live_checked_at"):
+            if col not in products:
+                products[col] = pd.NA
+        acfg = self.study.raw.get("apify", {})
+        want = top or acfg.get("top_products", 20)
+        max_checks = int(acfg.get("max_live_checks", 40))
+        recheck_days = int(acfg.get("recheck_days", 30))
+        cfg = load_config()
+        cutoff = (pd.Timestamp(self.as_of) - pd.Timedelta(days=int(cfg.get("live_window_days", 120)))).strftime("%Y-%m-%d")
+
+        # Free pre-filter: unchecked products with no review in the last months
+        # of the historical dataset were already retired by 2023.
+        n = {"inactive": 0, "checked": 0, "paid": 0, "preflight": 0}
+        dataset_end = self._status().get("backfill_mcauley", {}).get("dataset_end")
+        if dataset_end and len(products):
+            stored = rv.load(self.dir / "reviews.csv")
+            hist = stored[stored["source"].astype(str).str.startswith("mcauley")]
+            newest = pd.concat([hist.groupby("parent_asin")["review_date"].max(),
+                                hist.groupby("asin")["review_date"].max()]).groupby(level=0).max()
+            newest = newest[newest.index != ""]
+            last = pd.concat([products["asin"].map(newest), products["parent_asin"].map(newest)], axis=1).max(axis=1)
+            active_from = (pd.Timestamp(dataset_end)
+                           - pd.Timedelta(days=int(acfg.get("history_active_days", 180)))).strftime("%Y-%m-%d")
+            unchecked = ~products["live"].astype(str).isin(["True", "False"])
+            seed = products["source"].astype(str).str.startswith("manual")
+            inactive = unchecked & ~seed & ~(last.fillna("") >= active_from)
+            products.loc[inactive, ["live", "live_checked_at"]] = ["False", utcnow()]
+            n["inactive"] = int(inactive.sum())
+
         client = ApifyReviews(log=self.log)
-        preflight(client, self.as_of)
-        cutoff = (pd.Timestamp(self.as_of)
-                  - pd.Timedelta(days=int(load_config().get("live_window_days", 120)))).strftime("%Y-%m-%d")
-        live, dead = [], []
-        for p in self.tracked_products(products, top=len(products)).itertuples():
-            if len(live) >= want:
-                break
+        ranked = self.tracked_products(products, top=len(products), include_unchecked=True)
+        t = self.company.ticker
+        live: list[str] = []
+        dead: list[str] = []
+        pending: list[str] = []
+
+        def say(msg: str) -> None:
+            if progress:
+                print(f"  {t}: {msg}", flush=True)
+
+        def probe(asin: str) -> tuple[str, str | None, str | None, Exception | None]:
             try:
-                latest, err = client.newest_review(p.asin), None
-            except ProductUnavailable as e:  # e.g. the listing page is gone
-                latest, err = None, str(e)
-            ok = bool(latest and latest >= cutoff)
-            _mark_live(products, p.asin, ok)
-            (live if ok else dead).append(p.asin if ok else f"{p.asin} (newest {latest or err})")
-        products.to_csv(path, index=False)
-        info = {"live": live, "retired": dead, "wanted": want, "cutoff": cutoff}
+                return asin, client.newest_review(asin), None, None
+            except ProductUnavailable:  # e.g. the listing page is gone
+                return asin, None, "listing unreadable", None
+            except SourceUnavailable as e:  # Apify itself unavailable (e.g. credit used up)
+                return asin, None, None, e
+
+        def flush() -> None:
+            if not pending:
+                return
+            if not n["preflight"]:
+                preflight(client, self.as_of)  # fail fast if the scraper itself is broken
+                n["preflight"] = 1
+            with ThreadPoolExecutor(workers) as ex:
+                results = list(ex.map(probe, pending))
+            pending.clear()
+            failure = next((fail for *_, fail in results if fail), None)
+            for asin, latest, err, fail in results:
+                if fail:
+                    continue
+                n["paid"] += 1
+                ok = bool(latest and latest >= cutoff)
+                _mark_live(products, asin, ok)
+                (live if ok else dead).append(asin if ok else f"{asin} (newest {latest or err})")
+                say(f"{asin} {'LIVE' if ok else 'retired'} (newest review {latest or err or 'none'})"
+                    f"  [{len(live)}/{want} live]")
+            products.to_csv(path, index=False)
+            if failure:
+                raise failure  # results that came back are saved first
+
+        try:
+            for p in ranked.itertuples():
+                if len(live) + len(pending) >= want:
+                    flush()  # enough in flight: see how many were really live
+                if len(live) >= want or n["checked"] >= max_checks:
+                    break
+                n["checked"] += 1
+                if str(p.live) in ("True", "False") and self._checked_within(p, recheck_days):
+                    if str(p.live) == "True":  # checked recently: reuse, don't pay again
+                        live.append(p.asin)
+                    continue
+                pending.append(p.asin)
+                if len(pending) >= workers:
+                    flush()
+            flush()
+        finally:
+            products.to_csv(path, index=False)  # keep what was learned, even if Apify stops
+        info = {"live": live, "retired": dead, "skipped_inactive_in_history": n["inactive"], "wanted": want,
+                "checked": n["checked"], "apify_checks": n["paid"] + n["preflight"], "max_checks": max_checks,
+                "cutoff": cutoff}
         self.note("check_live", **info)
         return info
 
-    def tracked_products(self, products: pd.DataFrame | None = None, top: int | None = None) -> pd.DataFrame:
+    def _checked_within(self, row, days: int) -> bool:
+        at = pd.to_datetime(getattr(row, "live_checked_at", None), errors="coerce", utc=True)
+        return pd.notna(at) and at.tz_convert(None) >= pd.Timestamp(self.as_of) - pd.Timedelta(days=days)
+
+    def tracked_products(self, products: pd.DataFrame | None = None, top: int | None = None,
+                         include_unchecked: bool | None = None) -> pd.DataFrame:
         """The products followed live: hand-seeded ASINs, then the most-reviewed.
 
         Scraping is paid per review, so only these are scraped. Tone is also
         measured on exactly this set in every quarter, historical or live, so a
         change in AbnormalTone can't come from a change in which products are
         counted.
+
+        Products marked retired are skipped. Once any product has been checked
+        (check-live or a live fetch), only products confirmed live (and seeds)
+        count, so an unchecked, probably retired product never fills a slot.
+        include_unchecked=True lists every candidate, for walking the ranking.
         """
         if products is None:
             path = self.dir / "products.csv"
             products = pd.read_csv(path, dtype=str) if path.exists() else pd.DataFrame(columns=catalog.PRODUCT_COLUMNS)
         top = top or self.study.raw.get("apify", {}).get("top_products", 20)
-        if "live" in products:
-            products = products[products["live"].astype(str) != "False"]  # delisted products are skipped
-        return (products.assign(_seed=products["source"].astype(str).str.startswith("manual"),
+        status = products["live"].astype(str) if "live" in products else pd.Series("", index=products.index)
+        seed = products["source"].astype(str).str.startswith("manual")
+        keep = status != "False"
+        if include_unchecked is None:
+            include_unchecked = not status.isin(["True", "False"]).any()
+        if not include_unchecked:
+            keep &= (status == "True") | seed
+        products = products[keep]
+        return (products.assign(_seed=seed[keep],
                                 _n=pd.to_numeric(products["rating_number"], errors="coerce").fillna(0))
                 .sort_values(["_seed", "_n"], ascending=False).head(top).drop(columns=["_seed", "_n"]))
 

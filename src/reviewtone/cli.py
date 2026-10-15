@@ -139,10 +139,22 @@ def main(argv: list[str] | None = None) -> int:
         run = Run(study, study.company(_tickers(study, args)[0]), as_of=as_of)
         print(f"{run.fetch_reviews(args.source, review_locations=args.reviews, csv_path=args.csv, max_reviews_per_product=args.max_reviews, top_products=args.top)} new reviews")
     elif args.cmd == "check-live":
+        from .sources.apify import load_config
+        price = float(load_config().get("price_per_review", 0.0018))
+        runs = 0
         for t in _tickers(study, args):
-            info = Run(study, study.company(t), as_of=as_of).check_live(args.top)
-            print(f"{t}: {len(info['live'])} of {info['wanted']} live products found"
-                  + (f"; retired: {', '.join(info['retired'])}" if info["retired"] else ""), flush=True)
+            print(f"{t}: checking which top products are still sold", flush=True)
+            try:
+                info = Run(study, study.company(t), as_of=as_of).check_live(args.top)
+            except SourceUnavailable as e:
+                print(f"\nStopped at {t}: {e}\nEverything checked so far is saved; rerun the same command "
+                      "to continue (finished products are not checked or paid for again).", file=sys.stderr)
+                return 1
+            runs += info["apify_checks"]
+            print(f"{t}: {len(info['live'])} of {info['wanted']} live products found "
+                  f"({info['apify_checks']} Apify checks, {info['skipped_inactive_in_history']} skipped for free "
+                  "as already retired in the history)\n", flush=True)
+        print(f"Done. {runs} Apify checks, about ${runs * 3 * price:.2f} of Apify credit.")
     elif args.cmd == "score":
         for t in _tickers(study, args):
             run = Run(study, study.company(t), as_of=as_of, scorer=args.scorer)

@@ -43,6 +43,13 @@ apify:
   # usually less). Weekly updates are sized to each product's review rate:
   # roughly $10-15/week for 15 x 10.
   top_products: 10
+  # check-live (run once before the first `run`; ~3 reviews ~ $0.005 per check):
+  # products with no review in the historical dataset's last 180 days are
+  # skipped for free as already retired, at most 40 candidates per company are
+  # checked on Apify, and results less than 30 days old are reused on a rerun.
+  history_active_days: 180
+  max_live_checks: 40
+  recheck_days: 30
 
 aggregation:
   # A fiscal quarter with fewer product-opinion reviews than this is flagged sparse

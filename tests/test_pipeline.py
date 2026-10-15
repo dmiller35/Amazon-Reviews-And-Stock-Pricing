@@ -232,3 +232,52 @@ def test_real_workflow_check_live_label_sample_then_naive_bayes(study, world, mo
     assert len(pd.read_csv(d / "scores_naive_bayes.csv")) == len(reviews)
     assert (d / "quarterly.csv").exists() and (d / "evaluation.json").exists()
     assert card["signal_quarter"] == quarters[-1].label
+
+
+def test_check_live_prefilters_caps_resumes_and_saves_on_failure(study, monkeypatch):
+    from reviewtone import reviews as rv
+    from reviewtone.http import SourceUnavailable
+    from reviewtone.pipeline import Run
+    from reviewtone.sources import apify
+
+    run = Run(study, study.company("YETI"), as_of=date(2026, 10, 14))
+    names = [f"P{i:02d}" for i in range(12)]
+    pd.DataFrame({"ticker": "YETI", "brand": "YETI", "asin": names, "parent_asin": names,
+                  "rating_number": [str(1000 - i) for i in range(12)], "source": "mcauley2023:x",
+                  "live": "", "live_checked_at": ""}).to_csv(run.dir / "products.csv", index=False)
+    # History ends 2023-09-30. P00 and P01 stopped getting reviews in 2020: free skip.
+    last = {a: ("2020-05-01" if a in ("P00", "P01") else "2023-09-20") for a in names}
+    rv.append_new(run.dir / "reviews.csv", pd.DataFrame(
+        {"asin": names, "parent_asin": names, "ticker": "YETI", "brand": "YETI", "rating": 5.0,
+         "review_date": [last[a] for a in names], "title": "t", "text": names, "source": "mcauley2023:x"}))
+    run.note("backfill_mcauley", dataset_end="2023-09-30")
+    live_now = {"B07SGPJBZ6", "P03", "P05", "P06"}
+    asked = []
+
+    def fake(self, asin):
+        asked.append(asin)
+        if asin == "P07":
+            raise SourceUnavailable("Apify unreachable: HTTP 402 persisted")  # credit used up
+        return "2026-10-10" if asin in live_now else "2022-01-01"
+
+    monkeypatch.setenv("APIFY_TOKEN", "t")
+    monkeypatch.setattr(apify.ApifyReviews, "newest_review", fake)
+    with pytest.raises(SourceUnavailable):
+        run.check_live(top=4, progress=False)
+    saved = pd.read_csv(run.dir / "products.csv", dtype=str).set_index("asin")["live"]
+    assert "P00" not in asked and "P01" not in asked and saved["P00"] == "False"  # skipped for free
+    assert saved["P03"] == "True" and saved["P02"] == "False"  # checked before the failure: kept
+
+    asked.clear()
+    live_now.add("P07")
+    monkeypatch.setattr(apify.ApifyReviews, "newest_review",
+                        lambda self, asin: asked.append(asin) or ("2026-10-10" if asin in live_now else "2022-01-01"))
+    info = run.check_live(top=4, progress=False)
+    assert info["live"] == ["P03", "P05", "P06", "P07"]
+    assert not {"P02", "P03", "P04", "P05", "P06"} & set(asked)  # rerun reuses saved checks
+    assert run.tracked_products(top=10)["asin"].tolist() == ["P03", "P05", "P06", "P07"]  # unchecked never fill
+
+    capped = run.check_live(top=10, progress=False)  # wants 10, but at most max_live_checks candidates
+    study.raw["apify"]["max_live_checks"] = 3
+    assert capped["checked"] <= 40
+    assert run.check_live(top=10, progress=False)["checked"] == 3
