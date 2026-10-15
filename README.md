@@ -45,7 +45,7 @@ anticipate a company's revenue and its stock's reaction to earnings. It implemen
 
 | Choice | Why |
 |---|---|
-| Claude rubric (−2..+2) instead of Naive Bayes; NB still available (`--scorer naive_bayes`) and trainable on Claude labels or your own hand-coded `labels.csv` | The paper's NB used 15k hand-coded summaries we don't have. The prompt asked for "Jev if available, otherwise Claude", and Jev has no public API, so the default is Claude. |
+| Labels come from a Claude (Haiku) rubric (−2..+2) on a sample of each company's reviews instead of hand coding; the paper's Naive Bayes learns from them and scores every review (`--scorer claude` scores everything with Claude instead) | The paper's NB used 15k hand-coded summaries we don't have, and Jev (the prompt's first choice) has no public API. Scoring years of history with Claude would cost far more than a labelled sample. |
 | Title **and** body scored (paper: title only); `include_body: false` restores the paper | Modern reviews are long and the body carries the defect detail ("double left click of doom"). |
 | Single-company outcome is the **growth surprise**, not AbnormalSales | AbnormalSales is dominated by seasonality for one firm (Logitech's holiday quarter). The paper absorbed that with pooled fixed effects. AbnormalSales and YoY growth are still in `panel.csv`. |
 | Only **negative** swings produce calls (`call_positive_swings: false`) | Tables 9–11: positive swings predicted nothing. |
@@ -82,13 +82,14 @@ Codespaces → Secrets), then run the commands below in its terminal.
 
 ```bash
 reviewtone backfill --all          # 1. history 2018-Sep 2023: products.csv + reviews.csv for every company
-                                   #    (streams ~42 GB once, resuming if the connection drops; 1-2 hours; free)
-reviewtone fetch --ticker LOGI --source apify                      # 2. recent reviews (Apify, paid: up
-                                   #    to 10 products x 5 stars x 100 = 5,000 reviews, at most $9)
-reviewtone score --ticker LOGI --sample 200                        # 3. try Claude on 200 reviews, check cost
-reviewtone run --ticker LOGI --scorer naive_bayes                  # 4. score the rest cheaply, then
-                                   #    quarters, charts, SEC join, held-out eval, prediction, report
-reviewtone run --all && reviewtone portfolio                       # 5. every company + long/short list
+                                   #    (streams ~42 GB once, resumable; 1-2 hours; free)
+reviewtone check-live --all        # 2. which top products are still sold (~3 reviews each on Apify, ~$1)
+reviewtone score --all --scorer claude --sample 1000   # 3. Claude (Haiku) labels 1,000 reviews per company
+reviewtone run --all               # 4. Naive Bayes learns from those labels and scores everything (free),
+                                   #    then quarters, charts, SEC join, held-out eval, prediction, report
+reviewtone portfolio               # 5. long/short portfolio across companies
+reviewtone fetch --ticker LOGI --source apify   # 6. recent reviews (Apify, paid: up to 10 products
+                                   #    x 5 stars x 100 = 5,000 reviews, at most $9 per company)
 ```
 
 `backfill` only scans the categories listed in each company's file
@@ -167,10 +168,12 @@ reviewtone run --ticker LOGI --source mcauley \
 ```
 
 Then layer Apify on top for the quarters since. Both sources de-duplicate into the
-same append-only `reviews.csv`. Scoring a whole category history with Claude is the
-expensive part. The cheaper route is the paper's: label a sample with Claude
-(`reviewtone score --sample 1500`), then `--scorer naive_bayes` trains on those
-labels and scores everything (holdout accuracy goes to `models/naive_bayes.json`).
+same append-only `reviews.csv`. Scoring a whole category history with Claude would
+be the expensive part, so the default is the paper's route: label a sample with
+Claude (`reviewtone score --all --scorer claude --sample 1000`), and Naive Bayes
+trains on those labels and scores everything (holdout accuracy goes to
+`models/naive_bayes.json`). Run `check-live` before the first `run`: it fixes
+which products are tracked, and those decide which reviews the backtest uses.
 
 ## Adding a company
 

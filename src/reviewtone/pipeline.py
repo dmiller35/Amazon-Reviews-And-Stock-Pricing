@@ -192,6 +192,38 @@ class Run:
             sizes[star] = int(min(cap, max(5, -(-rate * days * 1.5 // 1) + 3)))
         return sizes
 
+    def check_live(self, top: int | None = None) -> dict:
+        """Mark which of the most-reviewed products are still sold, without fetching them.
+
+        Run this before the first `run`: the tracked products (the top N that
+        are still live) decide which reviews the backtest uses, so they should
+        be fixed before results exist. Costs about 3 scraped reviews per product
+        checked.
+        """
+        from .sources.apify import ApifyReviews, ProductUnavailable, load_config, preflight
+        path = self.dir / "products.csv"
+        products = pd.read_csv(path, dtype=str) if path.exists() else pd.DataFrame(columns=catalog.PRODUCT_COLUMNS)
+        want = top or self.study.raw.get("apify", {}).get("top_products", 20)
+        client = ApifyReviews(log=self.log)
+        preflight(client, self.as_of)
+        cutoff = (pd.Timestamp(self.as_of)
+                  - pd.Timedelta(days=int(load_config().get("live_window_days", 120)))).strftime("%Y-%m-%d")
+        live, dead = [], []
+        for p in self.tracked_products(products, top=len(products)).itertuples():
+            if len(live) >= want:
+                break
+            try:
+                latest, err = client.newest_review(p.asin), None
+            except ProductUnavailable as e:  # e.g. the listing page is gone
+                latest, err = None, str(e)
+            ok = bool(latest and latest >= cutoff)
+            products.loc[products["asin"] == p.asin, ["live", "live_checked_at"]] = [ok, utcnow()]
+            (live if ok else dead).append(p.asin if ok else f"{p.asin} (newest {latest or err})")
+        products.to_csv(path, index=False)
+        info = {"live": live, "retired": dead, "wanted": want, "cutoff": cutoff}
+        self.note("check_live", **info)
+        return info
+
     def tracked_products(self, products: pd.DataFrame | None = None, top: int | None = None) -> pd.DataFrame:
         """The products followed live: hand-seeded ASINs, then the most-reviewed.
 
@@ -234,6 +266,12 @@ class Run:
         if reviews.empty:
             raise RuntimeError(f"No reviews for {self.company.ticker}; run `reviewtone fetch` first.")
         name = scorer or self.scorer_name
+        if sample:
+            # Label the reviews the measure is built from (the tracked products).
+            tracked = self.tracked_products()
+            ids = set(tracked["asin"]) | set(tracked["parent_asin"].dropna())
+            mine = reviews[reviews["asin"].isin(ids) | reviews["parent_asin"].isin(ids)]
+            reviews = mine if len(mine) >= sample else reviews
         scores = score_reviews(self.study, self.dir, reviews, name, sample=sample)
         self.note("score", scorer=name, scored=len(scores), reviews=len(reviews))
         return scores

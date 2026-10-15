@@ -168,3 +168,26 @@ def test_tracked_products_scope_and_dataset_end(study):
     assert q.loc["FY23Q3", "partial_coverage"]          # dataset ends mid-quarter
     assert not q.loc["FY23Q2", "partial_coverage"]
     assert not q["usable"].loc["FY23Q3":].any()
+
+
+def test_check_live_marks_retired_products_before_the_study_locks(study, monkeypatch):
+    from reviewtone.pipeline import Run
+    from reviewtone.sources import apify
+
+    run = Run(study, study.company("YETI"), as_of=date(2026, 10, 14))
+    pd.DataFrame({"ticker": "YETI", "brand": "YETI", "asin": ["OLD", "NEW", "MID", "LOW"],
+                  "parent_asin": ["OLD", "NEW", "MID", "LOW"], "rating_number": ["900", "800", "700", "10"],
+                  "source": "mcauley2023:x"}).to_csv(run.dir / "products.csv", index=False)
+    newest = {"B07SGPJBZ6": "2026-10-10", "OLD": "2021-03-01", "NEW": "2026-10-01", "MID": "2026-09-20"}
+    asked = []
+
+    def fake(self, asin):
+        asked.append(asin)
+        return newest.get(asin)
+
+    monkeypatch.setenv("APIFY_TOKEN", "t")
+    monkeypatch.setattr(apify.ApifyReviews, "newest_review", fake)
+    info = run.check_live(top=2)
+    assert info["live"] == ["NEW", "MID"] and info["retired"] == ["OLD (newest 2021-03-01)"]
+    assert "LOW" not in asked  # stops once enough live products are found
+    assert run.tracked_products(top=2)["asin"].tolist() == ["NEW", "MID"]

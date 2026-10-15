@@ -23,7 +23,10 @@ tone:
   # naive_bayes: the paper's method; trained on a labelled sample (Claude labels
   #   or a manual labels CSV) and applied to every review.
   # lexicon: tiny offline word-list baseline for smoke tests only.
-  scorer: claude
+  # Default: naive_bayes trained on a Claude-labelled sample of each company's
+  # reviews (`reviewtone score --all --scorer claude --sample 1000`). Scoring
+  # every historical review with Claude would cost far more for little gain.
+  scorer: naive_bayes
   # Haiku: fast and inexpensive; tone classification doesn't need a larger model.
   claude_model: claude-haiku-5-5
   claude_effort: low

@@ -85,8 +85,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-reviews", type=int, default=100,
                    help="Apify: newest reviews per product (per star rating for star-filtered actors)")
 
+    p = sub.add_parser("check-live", help="mark which top products are still sold (cheap; run before the first run)")
+    company_args(p)
+    p.add_argument("--top", type=int, help="live products wanted per company (default: config apify.top_products)")
+
     p = sub.add_parser("score", help="step 4: score tone of unscored reviews")
-    company_args(p, allow_all=False)
+    company_args(p)
     p.add_argument("--scorer", choices=["claude", "naive_bayes", "lexicon"])
     p.add_argument("--sample", type=int, help="score only a random sample (e.g. to label data for naive_bayes)")
 
@@ -134,9 +138,15 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "fetch":
         run = Run(study, study.company(_tickers(study, args)[0]), as_of=as_of)
         print(f"{run.fetch_reviews(args.source, review_locations=args.reviews, csv_path=args.csv, max_reviews_per_product=args.max_reviews, top_products=args.top)} new reviews")
+    elif args.cmd == "check-live":
+        for t in _tickers(study, args):
+            info = Run(study, study.company(t), as_of=as_of).check_live(args.top)
+            print(f"{t}: {len(info['live'])} of {info['wanted']} live products found"
+                  + (f"; retired: {', '.join(info['retired'])}" if info["retired"] else ""), flush=True)
     elif args.cmd == "score":
-        run = Run(study, study.company(_tickers(study, args)[0]), as_of=as_of, scorer=args.scorer)
-        print(f"{len(run.score(sample=args.sample))} reviews have scores")
+        for t in _tickers(study, args):
+            run = Run(study, study.company(t), as_of=as_of, scorer=args.scorer)
+            print(f"{t}: {len(run.score(sample=args.sample))} reviews have {run.scorer_name} scores", flush=True)
     elif args.cmd == "run":
         factors = _factors()
         for t in _tickers(study, args):
