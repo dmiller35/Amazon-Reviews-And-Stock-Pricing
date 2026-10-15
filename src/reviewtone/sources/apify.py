@@ -310,15 +310,19 @@ class ApifyReviews:
             raise RunFailed(f"{asin}: actor run {run['status']}")
         return self._call("GET", f"/datasets/{run['defaultDatasetId']}/items", params={"clean": "true"}).json()
 
-    def newest_review(self, asin: str) -> str | None:
-        """Date of the product's newest review, from a few-review request (cheap).
+    def newest_reviews(self, asin: str, n: int = 3) -> list[str]:
+        """Dates of the product's n newest reviews, newest first, from one cheap request.
 
         Uses the last configured star filter (5 stars: the most frequent) so it
-        costs at most 3 reviews.
+        costs at most n reviews.
         """
-        items = self.run(self.profile.payloads(asin, 3, None)[-1], asin=asin)
+        items = self.run(self.profile.payloads(asin, n, None)[-1], asin=asin)
         df, _ = normalize_items(items, ticker="", brand="", fetched_at="")
-        return df["review_date"].max() if len(df) else None
+        return sorted(df["review_date"].dropna(), reverse=True)
+
+    def newest_review(self, asin: str) -> str | None:
+        dates = self.newest_reviews(asin)
+        return dates[0] if dates else None
 
     def fetch(self, asin: str, *, ticker: str, brand: str, max_reviews: int | dict[int, int] = 100,
               since: str | None = None, timeout_s: int = 900, back_to: str | None = None,

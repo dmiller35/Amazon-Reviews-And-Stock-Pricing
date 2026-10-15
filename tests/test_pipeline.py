@@ -187,7 +187,7 @@ def test_check_live_marks_retired_products_before_the_study_locks(study, monkeyp
         return newest.get(asin)
 
     monkeypatch.setenv("APIFY_TOKEN", "t")
-    monkeypatch.setattr(apify.ApifyReviews, "newest_review", fake)
+    monkeypatch.setattr(apify.ApifyReviews, "newest_reviews", lambda self, asin, n=3: [d for d in [fake(self, asin)] if d])
     info = run.check_live(top=2)
     assert info["live"] == ["NEW", "MID"] and info["retired"] == ["OLD (newest 2021-03-01)"]
     assert "LOW" not in asked  # stops once enough live products are found
@@ -215,7 +215,7 @@ def test_real_workflow_check_live_label_sample_then_naive_bayes(study, world, mo
 
     monkeypatch.setenv("APIFY_TOKEN", "t")
     newest = {"B07SGPJBZ6": as_of.isoformat(), "B000TEST01": as_of.isoformat(), "RETIRED": "2019-01-01"}
-    monkeypatch.setattr(apify.ApifyReviews, "newest_review", lambda self, asin: newest[asin])
+    monkeypatch.setattr(apify.ApifyReviews, "newest_reviews", lambda self, asin, n=3: [newest[asin]])
     assert run.check_live()["live"] == ["B000TEST01"]
 
     class FakeClaude(LexiconToneScorer):
@@ -227,7 +227,7 @@ def test_real_workflow_check_live_label_sample_then_naive_bayes(study, world, mo
     monkeypatch.setattr("reviewtone.tone.claude.ClaudeToneScorer", FakeClaude)
     assert len(run.score(scorer="claude", sample=400)) == 400
 
-    card = run_company(study, "LOGI", source=None, factors=None, as_of=as_of)  # default scorer: naive_bayes
+    card = run_company(study, "LOGI", source=None, factors=None, as_of=as_of, scorer="naive_bayes")
     d = study.ticker_dir("LOGI")
     assert len(pd.read_csv(d / "scores_naive_bayes.csv")) == len(reviews)
     assert (d / "quarterly.csv").exists() and (d / "evaluation.json").exists()
@@ -261,7 +261,7 @@ def test_check_live_prefilters_caps_resumes_and_saves_on_failure(study, monkeypa
         return "2026-10-10" if asin in live_now else "2022-01-01"
 
     monkeypatch.setenv("APIFY_TOKEN", "t")
-    monkeypatch.setattr(apify.ApifyReviews, "newest_review", fake)
+    monkeypatch.setattr(apify.ApifyReviews, "newest_reviews", lambda self, asin, n=3: [d for d in [fake(self, asin)] if d])
     with pytest.raises(SourceUnavailable):
         run.check_live(top=4, progress=False)
     saved = pd.read_csv(run.dir / "products.csv", dtype=str).set_index("asin")["live"]
@@ -270,8 +270,8 @@ def test_check_live_prefilters_caps_resumes_and_saves_on_failure(study, monkeypa
 
     asked.clear()
     live_now.add("P07")
-    monkeypatch.setattr(apify.ApifyReviews, "newest_review",
-                        lambda self, asin: asked.append(asin) or ("2026-10-10" if asin in live_now else "2022-01-01"))
+    monkeypatch.setattr(apify.ApifyReviews, "newest_reviews",
+                        lambda self, asin, n=3: asked.append(asin) or ["2026-10-10" if asin in live_now else "2022-01-01"])
     info = run.check_live(top=4, progress=False)
     assert info["live"] == ["P03", "P05", "P06", "P07"]
     assert not {"P02", "P03", "P04", "P05", "P06"} & set(asked)  # rerun reuses saved checks

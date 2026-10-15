@@ -84,15 +84,22 @@ Codespaces → Secrets), then run the commands below in its terminal.
 
 ```bash
 reviewtone backfill --all          # 1. history 2018-Sep 2023 (free; ~42 GB streamed, resumable)
-reviewtone check-live --all        # 2. which top products are still sold (Apify, ~$0.05-0.15 per company)
-reviewtone estimate --all          # 3. free: expected costs per company and when live calls can start
-reviewtone score --all --scorer claude --sample 1000   # 4. Claude Haiku labels 1,000 reviews per company
-                                   #    (Anthropic, ~$0.05 per company; running cost is printed)
-reviewtone run --all               # 5. Naive Bayes scores everything (free), then quarters, charts,
-                                   #    SEC revenue, held-out evaluation, prediction, report
+reviewtone check-live --all        # 2. which top products are still sold, and today's review rate
+                                   #    (Apify, ~$0.05-0.15 per company)
+reviewtone estimate --all          # 3. free: expected costs per company, and whether/when it can make live calls
+reviewtone score --ticker LOGI --scorer claude --sample 25   # 4. 1-cent check that your Claude key works
+reviewtone update                  # 5. first live fetch, Claude scores every measured review, SEC revenue,
+                                   #    prices, held-out evaluation, prediction and report for every company.
+                                   #    Locks the study. Run it again every week (or 4 weeks) after that.
 reviewtone portfolio               # 6. long/short portfolio across companies (needs 4+ companies)
-reviewtone update                  # 7. live reviews from Apify (first fetch, then weekly or every 4 weeks)
 ```
+
+A company makes live calls only when its tracked products have enough current
+reviews (`min_reviews_per_quarter`, 30 in the measured star ratings). In testing,
+Turtle Beach's products had faded to 9-25 such reviews a quarter, so its report
+honestly says "no call: data too thin" every quarter. `estimate` (calibrated by
+`check-live`'s probe) shows this before you pay for the first fetch; if a company
+is short, raise `apify.top_products` before the first `update`, or drop it.
 
 Tested end to end on 2026-10-15 with real data for five companies (Turtle Beach,
 YETI, Corsair, Logitech, ACCO): every step above ran against the real sources.

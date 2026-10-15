@@ -15,10 +15,11 @@ year of the historical dataset. From them:
 - first live call: the first quarter whose matched products have at least
   min_reviews_per_quarter reviews.
 
-Products already followed live use their live review rates; the rest use
-2022-23 rates, which can be far off today (in testing one product matched its
-2022-23 rate closely and another had fallen by two thirds), so treat the
-numbers as estimates and the `run` report as the truth.
+Products already followed live use their live review rates; products checked
+by check-live have their 2022-23 rates scaled to today's five-star rate from its
+probe; the rest use 2022-23 rates, which can be far off (in testing, one
+company's live volume was 4-10x below its 2022-23 rate). Treat the numbers as
+estimates; the `run` report after the first fetch is the truth.
 """
 
 from __future__ import annotations
@@ -77,7 +78,7 @@ def company(run, cap: int = 100, label_sample: int = 1000) -> dict:
     first_reviews = 0.0
     update = {"weekly": 0.0, "four_weekly": 0.0}
     per_quarter = 0.0
-    no_history = 0
+    no_history = calibrated = measured_history = 0
     products_out = []
     for p in tracked.itertuples():
         mine = hist[(hist["parent_asin"] == p.asin) | (hist["asin"] == p.asin)]
@@ -91,10 +92,19 @@ def company(run, cap: int = 100, label_sample: int = 1000) -> dict:
             update["four_weekly"] += 2 * len(stars)
             continue
         rate = history_rates(mine)
+        measured_history += int(mine["star"].isin(stars).sum())
         live = reviews[((reviews["parent_asin"] == p.asin) | (reviews["asin"] == p.asin))
                        & reviews["source"].astype(str).str.startswith("apify")]
+        probe = pd.to_numeric(getattr(p, "probe_rate", None), errors="coerce")
         if p.asin in live_done and len(live):
             rate = live_rates(live)  # already followed live: today's rate beats the 2022-23 one
+            calibrated += 1
+        elif pd.notna(probe) and rate[5] > 0:
+            # check-live measured today's five-star rate: scale the 2022-23 rates to it
+            # (products fade or grow; in testing one product's rate had fallen ~80%).
+            scale = min(3.0, max(0.05, float(probe) / rate[5]))
+            rate = {st: r * scale for st, r in rate.items()}
+            calibrated += 1
         available = {s: float((mine["star"] == s).sum()) + rate[s] * days_since for s in STARS}
         if p.asin in live_done:
             gap = p.asin in gap_end.index
@@ -128,11 +138,24 @@ def company(run, cap: int = 100, label_sample: int = 1000) -> dict:
         "products_with_gap": sum(p["gap"] for p in products_out),
         "products_without_history": no_history,
         "cut_off_by_four_weekly": sum(p["cut_off_four_weekly"] for p in products_out),
-        "claude_label_usd": round(_claude_cost(hist, run.study.tone, label_sample), 3),
+        "calibrated_products": calibrated,
+        "claude_usd": round(_claude_once(run, hist, measured_history + first_reviews, label_sample), 2),
+        "claude_usd_per_month": round(_claude_cost(hist, run.study.tone, int(per_quarter / 3)), 2),
         "first_live_call": _first_call(run, products_out, min_reviews, "weekly"),
         "first_live_call_four_weekly": _first_call(run, products_out, min_reviews, "four_weekly"),
     })
     return out
+
+
+def _claude_once(run, hist: pd.DataFrame, measured: float, label_sample: int) -> float:
+    """One-off Claude cost: every measured review not yet scored (scorer claude), or a
+    labelling sample (scorer naive_bayes)."""
+    tone = run.study.tone
+    if tone.get("scorer") != "claude":
+        return _claude_cost(hist, tone, label_sample)
+    from .tone import latest_valid, load_scores
+    done = len(latest_valid(load_scores(run.dir / "scores.csv"), "claude"))
+    return _claude_cost(hist, tone, max(0, int(measured) - done))
 
 
 def _claude_cost(hist: pd.DataFrame, tone: dict, n: int) -> float:
@@ -173,7 +196,7 @@ def _first_call(run, products: list[dict], min_reviews: int, cadence: str) -> st
 
 def table(rows: list[dict]) -> str:
     head = ("Ticker", "Live", "Reviews/qtr", "First fetch", "Per month (weekly / 4-weekly updates)",
-            "Gap products", "Claude labels", "First live call (weekly updates)", "Notes")
+            "Gap products", "Claude scoring", "First live call (weekly updates)", "Notes")
     lines = [" | ".join(head), " | ".join("---" for _ in head)]
     for r in rows:
         if "note" in r:
@@ -183,7 +206,7 @@ def table(rows: list[dict]) -> str:
             r["ticker"], f"{r['tracked_products']}{'' if r['live_checked'] else ' (unchecked)'}",
             str(r["reviews_per_quarter"]), f"${r['first_fetch_usd']:.2f} ({r['first_fetch_reviews']})",
             f"${r['monthly_usd_weekly_updates']:.2f} / ${r['monthly_usd_four_weekly_updates']:.2f}",
-            str(r["products_with_gap"]), f"${r['claude_label_usd']:.3f}",
+            str(r["products_with_gap"]), f"${r['claude_usd']:.2f} once + ${r['claude_usd_per_month']:.2f}/mo",
             r["first_live_call"], _notes(r)]))
     ok = [r for r in rows if "note" not in r]
     if ok:
@@ -191,7 +214,8 @@ def table(rows: list[dict]) -> str:
         lines.append(f"Totals on Apify: first live fetch ${sum(r['first_fetch_usd'] for r in ok):.2f} once, then about "
                      f"${sum(r['monthly_usd_weekly_updates'] for r in ok):.2f} a month with weekly updates or "
                      f"${sum(r['monthly_usd_four_weekly_updates'] for r in ok):.2f} with updates every 4 weeks. "
-                     f"Claude labels: ${sum(r['claude_label_usd'] for r in ok):.2f} once (Anthropic).")
+                     f"Claude (Anthropic): ${sum(r['claude_usd'] for r in ok):.2f} once, then about "
+                     f"${sum(r['claude_usd_per_month'] for r in ok):.2f} a month.")
     return "\n".join(lines)
 
 
@@ -199,6 +223,9 @@ def _notes(r: dict) -> str:
     notes = []
     if not r["live_checked"]:
         notes.append("not checked live yet: rough")
+    elif r["calibrated_products"] < r["tracked_products"]:
+        notes.append(f"{r['tracked_products'] - r['calibrated_products']} product(s) on 2022-23 rates only "
+                     "(may be far off)")
     if r["cut_off_by_four_weekly"]:
         notes.append(f"{r['cut_off_by_four_weekly']} product(s) too busy for 4-weekly updates "
                      f"(4-weekly first call: {r['first_live_call_four_weekly']})")

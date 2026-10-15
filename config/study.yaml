@@ -23,10 +23,12 @@ tone:
   # naive_bayes: the paper's method; trained on a labelled sample (Claude labels
   #   or a manual labels CSV) and applied to every review.
   # lexicon: tiny offline word-list baseline for smoke tests only.
-  # Default: naive_bayes trained on a Claude-labelled sample of each company's
-  # reviews (`reviewtone score --all --scorer claude --sample 1000`). Scoring
-  # every historical review with Claude would cost far more for little gain.
-  scorer: naive_bayes
+  # Default: Claude scores every review in the measure (tracked products, the
+  # star ratings in aggregation.stars), history and new ones each week. With
+  # Haiku that is about $0.03-0.05 per 1,000 reviews; `run` prints the running
+  # cost. naive_bayes (the paper's method, trained on a Claude-labelled sample:
+  # `score --scorer claude --sample 1000`) is the free alternative, but less accurate.
+  scorer: claude
   # Haiku: fast and inexpensive; tone classification doesn't need a larger model.
   claude_model: claude-haiku-5-5
   claude_effort: low

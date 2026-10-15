@@ -244,9 +244,10 @@ class Run:
         from .sources.apify import ApifyReviews, ProductUnavailable, RunFailed, load_config, preflight
         path = self.dir / "products.csv"
         products = pd.read_csv(path, dtype=str) if path.exists() else pd.DataFrame(columns=catalog.PRODUCT_COLUMNS)
-        for col in ("live", "live_checked_at"):
+        for col in ("live", "live_checked_at", "probe_rate"):
             if col not in products:
                 products[col] = pd.NA
+        rates: dict[str, float] = {}
         acfg = self.study.raw.get("apify", {})
         want = top or acfg.get("top_products", 20)
         max_checks = int(acfg.get("max_live_checks", 40))
@@ -274,7 +275,11 @@ class Run:
 
         def probe(asin: str) -> tuple[str, str | None, str | None, Exception | None]:
             try:
-                return asin, client.newest_review(asin), None, None
+                dates = client.newest_reviews(asin)
+                if len(dates) >= 2:  # today's review rate: calibrates `estimate`, which only has 2023 rates
+                    span = max(1, (pd.Timestamp(self.as_of) - pd.Timestamp(dates[-1])).days)
+                    rates[asin] = len(dates) / span
+                return asin, (dates[0] if dates else None), None, None
             except RunFailed as e:  # temporary: leave the product unchecked
                 return asin, None, f"check failed ({e})", None
             except ProductUnavailable:
@@ -301,6 +306,8 @@ class Run:
                     continue
                 ok = bool(latest and latest >= cutoff)
                 _mark_live(products, asin, ok)
+                if asin in rates:
+                    products.loc[products["asin"] == asin, "probe_rate"] = f"{rates[asin]:.4f}"
                 (live if ok else dead).append(asin if ok else f"{asin} (newest {latest or err})")
                 state = "LIVE" if ok else ("retired" if latest else "no reviews available to the scraper")
                 say(f"{asin} {state} (newest review {latest or err or 'none'})  [{len(live)}/{want} live]")
@@ -409,16 +416,27 @@ class Run:
         if reviews.empty:
             raise RuntimeError(f"No reviews for {self.company.ticker}; run `reviewtone fetch` first.")
         name = scorer or self.scorer_name
-        if sample:
-            # Label the reviews the measure is built from (the tracked products).
-            tracked = self.tracked_products()
-            ids = set(tracked["asin"]) | set(tracked["parent_asin"].dropna())
-            mine = reviews[(reviews["asin"].isin(ids) | reviews["parent_asin"].isin(ids))
-                           & _in_stars(reviews, self.study.stars)]
-            reviews = mine if len(mine) >= sample else reviews[_in_stars(reviews, self.study.stars)]
-        scores = score_reviews(self.study, self.dir, reviews, name, sample=sample)
+        # Score (or label) exactly the reviews the tone measure is built from: tracked
+        # products, configured star ratings. Reviews outside it would cost and never count.
+        measured = self.measured_reviews(reviews)
+        if name == "naive_bayes":
+            measured = reviews  # free to apply; it is trained on the labelled measured reviews
+        if sample and len(measured) < sample:
+            measured = reviews[_in_stars(reviews, self.study.stars)]
+        scores = score_reviews(self.study, self.dir, measured, name, sample=sample)
+        reviews = measured
         self.note("score", scorer=name, scored=len(scores), reviews=len(reviews))
         return scores
+
+    def measured_reviews(self, reviews: pd.DataFrame) -> pd.DataFrame:
+        """Reviews of the tracked products (when product_scope is tracked) in the configured stars."""
+        reviews = reviews[_in_stars(reviews, self.study.stars)]
+        if self.study.aggregation.get("product_scope", "tracked") == "tracked":
+            tracked = self.tracked_products()
+            if len(tracked):
+                ids = set(tracked["asin"]) | set(tracked["parent_asin"].dropna())
+                reviews = reviews[reviews["asin"].isin(ids) | reviews["parent_asin"].isin(ids)]
+        return reviews
 
     def _scores(self) -> pd.DataFrame:
         from .tone import latest_valid, load_scores
