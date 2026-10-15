@@ -260,14 +260,32 @@ make storefronts ambiguous), JAKKS Pacific (mostly licensed character toys), and
 Kimberly-Clark, Church & Dwight and Clorox (Amazon too small a share to matter).
 With 15 firms the portfolio uses quartiles, as in the paper.
 
-## Weekly updates
+## Automatic weekly runs and paper trading (GitHub Actions)
 
-`scripts/weekly_update.sh` (cron example inside) runs `reviewtone update`. Run it weekly,
-or every 4 weeks to roughly halve the Apify cost (see `reviewtone estimate`). It fetches
-the newest reviews for every tracked product, scores only reviews not yet scored,
-re-evaluates, rebuilds reports, and snapshots `quarterly.csv`, `prediction.json`,
-`evaluation.json` and `status.json` into `research/<TICKER>/history/<date>/`.
-`reviews.csv` and `scores.csv` are append-only.
+`.github/workflows/weekly.yml` runs the whole pipeline in GitHub's cloud once a
+week, with no computer of yours on: history (first time only), live product checks
+(new companies only), new Amazon reviews, Claude scoring, SEC revenue, prices,
+predictions, the portfolio, and the paper-trading ledger. It wakes daily and runs
+only when no run has completed in the last 6 days or the last one was cut short,
+so the long first setup simply continues on the next days (every step resumes).
+
+Results are committed to `results/`:
+- `results/SUMMARY.md`: this week's call for every company, or why there is none;
+- `results/PAPER_TRADING.md` and `paper_trades.csv`: every call recorded before the
+  earnings announcement, as a $1,000 market-hedged paper position (short for a
+  slowdown call), closed the day after the announcement, with the revenue outcome;
+- `results/<TICKER>/README.md`: the full report with charts.
+
+The working data (reviews, scores, history; too large to commit) is kept in the
+release `pipeline-state` by `scripts/ci/state.sh`. Don't also run `update` in a
+Codespace: the two copies would diverge.
+
+Setup, once: add the repository secrets `ANTHROPIC_API_KEY`, `APIFY_TOKEN` and
+`SEC_USER_AGENT` (Settings > Secrets and variables > Actions), then Actions >
+Weekly update > Run workflow. GitHub emails you if a run fails. Set spending limits
+at Apify (Billing > usage limit) and Anthropic (Limits) so nothing can run away.
+
+To run by hand instead: `reviewtone update` (weekly), then read `research/`.
 
 ## Output folder (`research/<TICKER>/`)
 

@@ -8,3 +8,5 @@ data/raw/
 data/cache/
 .env
 .pytest_cache/
+# Working data: kept by the scheduled run in the "pipeline-state" release; results/ holds the readable copy.
+research/

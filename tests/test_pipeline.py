@@ -1,7 +1,8 @@
 """Offline end-to-end runs on synthetic data (code-path verification only)."""
 
 import json
-from datetime import date
+from datetime import date, timedelta
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -420,3 +421,57 @@ def test_estimate_counts_seeds_skips_retired_flags_busy_products_and_uses_record
     later = Run(study, study.company("YETI"), as_of=date(2027, 1, 20))
     r2 = estimate.company(later)
     assert r2["first_live_call"] == r["first_live_call"]  # doesn't slide a quarter later each quarter
+
+
+def test_paper_trades_open_before_the_announcement_and_close_after(study):
+    from reviewtone import paper
+
+    d = study.ticker_dir("YETI")
+    d.mkdir(parents=True, exist_ok=True)
+    card = {"ticker": "YETI", "signal_quarter": "FY26Q3", "call": "slowdown", "AbnormalTone": -0.09, "reviews": 120,
+            "revenue_already_reported": False, "expected_announcement": "around 2026-11-05"}
+    (d / "prediction.json").write_text(json.dumps(card))
+    days = pd.bdate_range("2026-10-01", "2026-12-31")
+    stock = pd.Series(0.0, index=days)
+    stock[pd.Timestamp("2026-11-06")] = -0.10    # falls 10% the day after earnings
+    market = pd.Series(0.0, index=days)
+    market[pd.Timestamp("2026-11-06")] = 0.01
+    prices = {"YETI": stock, "SPY": market}
+
+    pd.DataFrame({"fiscal_quarter": ["FY26Q3"], "announcement_date": [None], "GrowthSurprise": [None]}).to_csv(
+        d / "fundamentals.csv", index=False)
+    ledger = paper.update(study, date(2026, 10, 15), returns=prices.get)
+    assert ledger["status"].tolist() == ["open"] and ledger.loc[0, "entry_date"] == "2026-10-16"
+    paper.update(study, date(2026, 10, 22), returns=prices.get)  # same call again: no second position
+    assert len(paper.load(study)) == 1
+
+    pd.DataFrame({"fiscal_quarter": ["FY26Q3"], "announcement_date": ["2026-11-05"], "GrowthSurprise": [-0.04]}).to_csv(
+        d / "fundamentals.csv", index=False)
+    ledger = paper.update(study, date(2026, 11, 9), returns=prices.get)
+    row = ledger.iloc[0]
+    assert row["status"] == "closed" and row["exit_date"] == "2026-11-06"
+    assert float(row["excess_return"]) == pytest.approx(-0.11) and float(row["pnl"]) == pytest.approx(110.0)
+    assert row["revenue_hit"] == "True"
+    page = (study.research_dir / "PAPER_TRADING.md").read_text()
+    assert "total paper P&L $110.00" in page and "Revenue came in as called: 1 of 1" in page
+    assert "slowdown" in (study.research_dir / "SUMMARY.md").read_text()
+
+
+def test_scheduled_run_is_due_after_a_week_or_after_a_partial_run(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "ci" / "due.py"
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "results").mkdir()
+
+    def due(info):
+        if info is not None:
+            (tmp_path / "results" / "last_run.json").write_text(json.dumps(info))
+        return subprocess.run([sys.executable, str(script)], capture_output=True, text=True).stdout.strip()
+
+    assert due(None) == "run=true"                                                  # first run
+    today = date.today()
+    assert due({"date": today.isoformat(), "status": "complete"}) == "run=false"
+    assert due({"date": today.isoformat(), "status": "partial"}) == "run=true"       # cut short: continue
+    assert due({"date": (today - timedelta(days=7)).isoformat(), "status": "complete"}) == "run=true"

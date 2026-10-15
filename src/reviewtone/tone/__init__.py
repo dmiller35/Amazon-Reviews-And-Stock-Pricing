@@ -65,7 +65,8 @@ def get_scorer(study: Study, name: str, ticker_dir: Path, reviews: pd.DataFrame,
         t = study.tone
         return ClaudeToneScorer(model=t["claude_model"], effort=t.get("claude_effort", "low"),
                                 reviews_per_request=int(t.get("reviews_per_request", 25)),
-                                include_body=bool(t.get("include_body", True)))
+                                include_body=bool(t.get("include_body", True)),
+                                concurrency=int(t.get("concurrency", 4)))
     if name == "naive_bayes":
         return _naive_bayes(study, ticker_dir, reviews, scores)
     if name == "lexicon":
@@ -80,7 +81,7 @@ def write_rubric(ticker_dir: Path, scorer_name: str, model: str) -> None:
 
 
 def score_reviews(study: Study, ticker_dir: Path, reviews: pd.DataFrame, scorer_name: str | None = None,
-                  sample: int | None = None, seed: int = 7) -> pd.DataFrame:
+                  sample: int | None = None, seed: int = 7, block: int = 500) -> pd.DataFrame:
     """Score unscored reviews, append to scores.csv, return latest valid scores for the scorer."""
     name = scorer_name or study.tone["scorer"]
     path = ticker_dir / "scores.csv"
@@ -100,8 +101,10 @@ def score_reviews(study: Study, ticker_dir: Path, reviews: pd.DataFrame, scorer_
     todo = reviews[~reviews["review_id"].isin(done)]
     if sample is not None and len(todo) > sample:
         todo = todo.sample(sample, random_state=seed)
-    if len(todo):
-        new = scorer.score(todo)[SCORE_COLUMNS]
+    # Saved every `block` reviews, so an interrupted run keeps what it paid for and the
+    # next run scores only what is left.
+    for start in range(0, len(todo), block):
+        new = scorer.score(todo.iloc[start:start + block])[SCORE_COLUMNS]
         new.to_csv(path, mode="a", header=not path.exists(), index=False)
         scores = pd.concat([scores, new], ignore_index=True)
     return latest_valid(scores, name)

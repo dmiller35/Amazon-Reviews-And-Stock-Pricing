@@ -1,0 +1,80 @@
+name: Weekly update
+
+# Runs the whole pipeline once a week in GitHub's cloud: new Amazon reviews, Claude
+# scoring, SEC revenue, prices, predictions, the portfolio and the paper-trading
+# ledger. It wakes daily but only runs when no run has completed in the last 6 days,
+# or the last one was cut short, so the first (long) setup finishes over a few days.
+# Results: results/SUMMARY.md and results/PAPER_TRADING.md in this repository.
+# Needs repository secrets ANTHROPIC_API_KEY, APIFY_TOKEN and SEC_USER_AGENT.
+
+on:
+  schedule:
+    - cron: "17 13 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Run now even if a run completed in the last 6 days"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weekly-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Is a run due?
+        id: due
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" = "true" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            python3 scripts/ci/due.py >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.due.outputs.run == 'true'
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        if: steps.due.outputs.run == 'true'
+        run: pip install --progress-bar off -e .
+
+      - name: Check secrets
+        if: steps.due.outputs.run == 'true'
+        run: scripts/ci/check_secrets.sh
+
+      - name: Restore working data
+        id: restore
+        if: steps.due.outputs.run == 'true'
+        run: scripts/ci/state.sh restore
+
+      - name: Run pipeline
+        if: steps.due.outputs.run == 'true'
+        timeout-minutes: 320
+        run: scripts/ci/weekly.sh
+
+      # Saved even when the pipeline step failed or timed out (every step resumes), but
+      # never when restoring failed: that would overwrite good data with a partial set.
+      - name: Save working data
+        if: always() && steps.restore.outcome == 'success'
+        run: scripts/ci/state.sh save
+
+      - name: Publish results
+        if: always() && steps.restore.outcome == 'success'
+        run: scripts/ci/publish.sh

@@ -34,7 +34,8 @@ class ClaudeToneScorer:
     name = "claude"
 
     def __init__(self, model: str, effort: str = "low", reviews_per_request: int = 25,
-                 include_body: bool = True, client: Any | None = None):
+                 include_body: bool = True, client: Any | None = None, concurrency: int = 4):
+        self.concurrency = max(1, concurrency)
         self.model = model
         self.effort = effort
         self.batch = reviews_per_request
@@ -111,9 +112,15 @@ class ClaudeToneScorer:
                 "reason": f"UNSCORED: {why}"}
 
     def score(self, reviews: pd.DataFrame, progress: bool = True) -> pd.DataFrame:
+        from concurrent.futures import ThreadPoolExecutor
+
         rows: list[dict[str, Any]] = []
-        for start in range(0, len(reviews), self.batch):
-            rows.extend(self._score_chunk(reviews.iloc[start:start + self.batch]))
+        chunks = [reviews.iloc[i:i + self.batch] for i in range(0, len(reviews), self.batch)]
+        # A few requests in parallel (the SDK retries rate limits); results keep their order.
+        with ThreadPoolExecutor(self.concurrency) as pool:
+            results = pool.map(self._score_chunk, chunks)
+        for start, part in zip(range(0, len(reviews), self.batch), results):
+            rows.extend(part)
             if progress:
                 cost = self.cost()
                 print(f"  scored {min(start + self.batch, len(reviews))}/{len(reviews)} reviews "

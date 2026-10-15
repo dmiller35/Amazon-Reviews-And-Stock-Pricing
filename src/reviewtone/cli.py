@@ -88,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("check-live", help="mark which top products are still sold (cheap; run before the first run)")
     company_args(p)
     p.add_argument("--top", type=int, help="live products wanted per company (default: config apify.top_products)")
+    p.add_argument("--missing", action="store_true", help="only companies never checked (for scheduled runs)")
 
     p = sub.add_parser("estimate", help="free: expected Apify and Claude costs and the first live call, per company")
     company_args(p)
@@ -109,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--new-study", action="store_true", help="re-register the study after changing config")
 
     sub.add_parser("portfolio", help="universe long/short portfolio and its Carhart alpha")
+
+    sub.add_parser("paper", help="update the paper-trading ledger and pages from the latest predictions")
 
     p = sub.add_parser("update", help="weekly job: fetch new Apify reviews, rescore, re-evaluate, snapshot")
     p.add_argument("--max-reviews", type=int, default=100,
@@ -146,6 +149,8 @@ def main(argv: list[str] | None = None) -> int:
         price = float(load_config().get("price_per_review", 0.0018))
         runs = 0
         for t in _tickers(study, args):
+            if args.missing and "check_live" in Run(study, study.company(t), as_of=as_of)._status():
+                continue
             print(f"{t}: checking which top products are still sold", flush=True)
             try:
                 info = Run(study, study.company(t), as_of=as_of).check_live(args.top)
@@ -177,11 +182,28 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "portfolio":
         print(json.dumps(run_universe(study, _factors(), as_of), indent=2, default=str))
     elif args.cmd == "update":
+        from . import paper
         factors = _factors()
+        failed = []
         for t in study.tickers:
-            card = run_company(study, t, source="apify", factors=factors, max_reviews=args.max_reviews, as_of=as_of)
-            print(f"{t}: {card.get('call', card.get('status'))}")
+            try:
+                card = run_company(study, t, source="apify", factors=factors, max_reviews=args.max_reviews,
+                                   as_of=as_of)
+                print(f"{t}: {card.get('call', card.get('status'))}", flush=True)
+            except Exception as e:  # one company's problem must not stop the others
+                failed.append(t)
+                print(f"{t}: FAILED {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         run_universe(study, factors, as_of)
+        ledger = paper.update(study, as_of)
+        print(f"paper trading: {(ledger['status'] == 'open').sum()} open, "
+              f"{ledger['status'].isin(['closed', 'expired']).sum()} closed (research/PAPER_TRADING.md)")
+        if failed:
+            print(f"Failed: {', '.join(failed)}", file=sys.stderr)
+            return 1
+    elif args.cmd == "paper":
+        from . import paper
+        ledger = paper.update(study, as_of)
+        print(f"{len(ledger)} paper trades; see {study.research_dir / 'PAPER_TRADING.md'}")
     return 0
 
 

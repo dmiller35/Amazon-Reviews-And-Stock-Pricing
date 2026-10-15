@@ -33,6 +33,9 @@ tone:
   claude_model: claude-haiku-5-5
   claude_effort: low
   reviews_per_request: 25
+  # Parallel Claude requests (the SDK backs off on rate limits). 4 suits a new
+  # account's limits; scores are saved every 500 reviews.
+  concurrency: 4
   # The paper scores the one-line review summary (title). We score title + body
   # but never show the star rating, so tone stays a separate signal from rating.
   include_body: true
