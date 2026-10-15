@@ -97,3 +97,9 @@ def isolated_cache(tmp_path, monkeypatch):
     monkeypatch.setattr("reviewtone.http.CACHE_DIR", tmp_path / "cache")
     yield
     shutil.rmtree(tmp_path / "cache", ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def fresh_preflight(monkeypatch):
+    from reviewtone.sources import apify
+    monkeypatch.setattr(apify, "_PREFLIGHT_PASSED", {})

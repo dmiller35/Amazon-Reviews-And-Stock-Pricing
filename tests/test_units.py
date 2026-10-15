@@ -416,8 +416,31 @@ def test_apify_run_polls_retries_and_flags_delisted(monkeypatch):
     monkeypatch.setenv("APIFY_TOKEN", "t")
     client = apify.ApifyReviews(actor="junglee/amazon-reviews-scraper")
     assert client.run({"x": 1}, asin="A")[0]["review_id"] == "x"
-    with pytest.raises(apify.ProductUnavailable):
+    with pytest.raises(apify.RunFailed):  # a failed run is temporary: never retires the product
         client.run({"x": 1}, asin="DEAD")
+
+
+def test_apify_run_that_times_out_is_aborted(monkeypatch):
+    from reviewtone.sources import apify
+
+    monkeypatch.setenv("APIFY_TOKEN", "t")
+    client = apify.ApifyReviews()
+    calls = []
+
+    class R:
+        status_code, text = 201, ""
+
+        def json(self):
+            return {"data": {"id": "r1", "status": "RUNNING", "defaultDatasetId": "d"}}
+
+    def call(method, path, **kw):
+        calls.append((method, path))
+        return R()
+
+    monkeypatch.setattr(client, "_call", call)
+    with pytest.raises(apify.RunFailed, match="timed out"):
+        client.run({"x": 1}, asin="SLOW", timeout_s=0)
+    assert ("POST", "/actor-runs/r1/abort") in calls
 
 
 def test_request_sizes_follow_review_rate(study):
@@ -560,7 +583,7 @@ def test_fetch_tops_up_a_busy_star_and_judges_truncation_on_raw_counts(monkeypat
     sizes = {1: 2, 2: 2, 3: 2, 4: 2, 5: 5}
     res = client.fetch("A", ticker="T", brand="B", max_reviews=sizes, back_to="2026-10-03", top_up=100)
     assert calls[:5] == [(1, 2), (2, 2), (3, 2), (4, 2), (5, 5)]
-    assert calls[5] == (5, 100)                     # five-star list filled before reaching back: topped up
+    assert calls[5:] == [(5, 20)]                   # filled before reaching back: topped up 4x, which reached it
     assert (res.reviews["rating"] == 5).sum() == 20
     assert "1-13" not in set(res.reviews["text"])  # the Canadian review is dropped
     # One-star: 2 raw items requested and returned (one Canadian, dropped) -> truncated, reaches back to the 2nd.

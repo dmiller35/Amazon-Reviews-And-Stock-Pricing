@@ -281,3 +281,141 @@ def test_check_live_prefilters_caps_resumes_and_saves_on_failure(study, monkeypa
     study.raw["apify"]["max_live_checks"] = 3
     assert capped["checked"] <= 40
     assert run.check_live(top=10, progress=False)["checked"] == 3
+
+
+def _apify_world(study, monkeypatch, behaviour):
+    """YETI with three tracked products P1-P3 and history to 2023-09-01; fake Apify per `behaviour`."""
+    from reviewtone import reviews as rv
+    from reviewtone.pipeline import Run
+    from reviewtone.sources import apify
+
+    run = Run(study, study.company("YETI"), as_of=date(2026, 10, 15))
+    names = ["P1", "P2", "P3"]
+    pd.DataFrame({"ticker": "YETI", "brand": "YETI", "asin": names, "parent_asin": names,
+                  "rating_number": ["300", "200", "100"], "source": "mcauley2023:x", "live": "True",
+                  "live_checked_at": "2026-10-14T00:00:00Z"}).to_csv(run.dir / "products.csv", index=False)
+    hist = [{"asin": a, "parent_asin": a, "ticker": "YETI", "brand": "YETI", "rating": 5.0, "title": "ok",
+             "text": f"{a} old {d}", "review_date": d, "source": "mcauley2023:x"}
+            for a in names for d in ("2022-06-01", "2023-01-10", "2023-09-01")]
+    rv.append_new(run.dir / "reviews.csv", pd.DataFrame(hist))
+    study.raw["apify"]["top_products"] = 3
+    monkeypatch.setenv("APIFY_TOKEN", "t")
+    monkeypatch.setattr(apify, "preflight", lambda client, as_of, config=None: "2026-10-10")
+
+    def fake_fetch(self, asin, *, ticker, brand, max_reviews=100, since=None, timeout_s=900, back_to=None, top_up=None):
+        return behaviour(asin, ticker, brand)
+
+    monkeypatch.setattr(apify.ApifyReviews, "fetch", fake_fetch)
+    return run
+
+
+def _live(asin, ticker, brand, dates):
+    from reviewtone.sources.apify import FetchResult
+    df = pd.DataFrame({"review_id": [f"{asin}-{d}" for d in dates], "ticker": ticker, "brand": brand, "asin": asin,
+                       "parent_asin": None, "review_date": dates, "rating": 5.0, "title": "Love it!",
+                       "text": "Love it!", "verified": True, "variant": "", "source": "apify:test",
+                       "source_url": "", "fetched_at": "2026-10-15T00:00:00Z"})
+    return FetchResult(df, False, None)
+
+
+def test_live_fetch_saves_each_product_skips_history_overlap_and_survives_failures(study, monkeypatch):
+    from reviewtone import reviews as rv
+    from reviewtone.sources.apify import RunFailed
+
+    def behaviour(asin, ticker, brand):
+        if asin == "P2":
+            raise RunFailed("P2: actor run FAILED")
+        if asin == "P3":
+            raise KeyboardInterrupt  # Codespace stopped mid-run
+        # reaches back into the 2023 history: the 2023-08-20 copy must not be stored twice
+        return _live(asin, ticker, brand, ["2023-08-20", "2025-02-01", "2026-10-01"])
+
+    run = _apify_world(study, monkeypatch, behaviour)
+    with pytest.raises(KeyboardInterrupt):
+        run.fetch_reviews("apify")
+    stored = rv.load(run.dir / "reviews.csv")
+    p1_live = stored[(stored["asin"] == "P1") & stored["source"].str.startswith("apify")]
+    assert sorted(p1_live["review_date"]) == ["2025-02-01", "2026-10-01"]  # saved before the interruption
+    live = pd.read_csv(run.dir / "products.csv", dtype=str).set_index("asin")["live"]
+    assert live["P1"] == "True" and live["P2"] == "True"  # a failed run never retires a product
+    assert pd.read_csv(run.dir / "coverage.csv")["asin"].tolist() == ["P1"]
+
+
+def test_same_day_fetch_keeps_the_current_quarter_visible(study, monkeypatch):
+    run = _apify_world(study, monkeypatch, lambda a, t, b: _live(a, t, b, ["2026-10-02", "2026-10-09", "2026-10-12"]))
+    study.raw["aggregation"]["min_reviews_per_quarter"] = 1
+    run.fetch_reviews("apify")
+    run.score(scorer="lexicon")
+    run.scorer = "lexicon"
+    q = run.aggregate(write=False).set_index("fiscal_quarter")
+    current = q.iloc[-1]
+    assert current["in_progress"] and current["n_reviews"] == 9 and pd.notna(current["mean_tone"])
+    assert current["n_products_excluded"] == 0  # fetched today and not cut off: nothing missing
+
+
+def test_product_without_history_buys_other_stars_only_back_to_the_five_star_cutoff(monkeypatch):
+    from reviewtone.sources import apify
+
+    monkeypatch.setenv("APIFY_TOKEN", "t")
+    client = apify.ApifyReviews()
+    calls = []
+    stars = {"one_star": 1, "two_star": 2, "three_star": 3, "four_star": 4, "five_star": 5}
+
+    def run(payload, **kw):
+        star, n = stars[payload["starFilter"]], payload["maxReviewsPerAsin"]
+        calls.append((star, n))
+        per_day = {5: 2.0, 1: 0.2}.get(star, 0.1)
+        days = pd.date_range(end="2026-10-14", periods=400, freq="D")[::-1]
+        out, acc = [], 0.0
+        for d in days:
+            acc += per_day
+            while acc >= 1 and len(out) < n:
+                out.append({"asin": "S", "rating": star, "title": "t", "text": "x", "body": "x",
+                            "published_date": d.strftime("%Y-%m-%d"), "review_origin_country": "the United States"})
+                acc -= 1
+        return out
+
+    monkeypatch.setattr(client, "run", run)
+    res = client.fetch("S", ticker="T", brand="B", max_reviews=100, back_to=apify.FIVE_STAR_CUTOFF, top_up=100)
+    assert calls[0] == (5, 100)                          # busiest list first: covers ~50 days
+    assert all(n <= 40 for star, n in calls[1:])          # others only as deep as that (10, topped up if needed)
+    assert len(res.reviews) < 200                        # not 5 x 100
+    assert res.hit_cap and res.complete_from >= "2026-08-20"
+
+
+def test_estimate_counts_seeds_skips_retired_flags_busy_products_and_uses_recorded_gaps(study):
+    from reviewtone import estimate, reviews as rv
+    from reviewtone.pipeline import Run
+
+    run = Run(study, study.company("YETI"), as_of=date(2026, 10, 15))
+    names = ["BUSY", "QUIET", "OLD", "SEED"]
+    pd.DataFrame({"ticker": "YETI", "brand": "YETI", "asin": names, "parent_asin": names,
+                  "rating_number": ["900", "500", "800", ""],
+                  "source": ["mcauley2023:x"] * 3 + ["manual:seed_asins.csv"]}).to_csv(run.dir / "products.csv", index=False)
+    rows = []
+    for d in pd.date_range("2021-01-01", "2023-09-07", freq="D"):
+        day = d.strftime("%Y-%m-%d")
+        rows += [{"asin": "BUSY", "rating": 5.0, "review_date": day, "text": f"b{day}{i}"} for i in range(4)]
+        if d.day == 1:
+            rows.append({"asin": "QUIET", "rating": 4.0, "review_date": day, "text": f"q{day}"})
+        if d.year == 2021:
+            rows.append({"asin": "OLD", "rating": 5.0, "review_date": day, "text": f"o{day}"})  # retired in 2021
+    hist = pd.DataFrame(rows).assign(parent_asin=lambda x: x["asin"], ticker="YETI", brand="YETI", title="t",
+                                     source="mcauley2023:x")
+    rv.append_new(run.dir / "reviews.csv", hist)
+    run.note("backfill_mcauley", dataset_end="2023-09-07")
+    study.raw["apify"]["top_products"] = 3
+
+    r = estimate.company(run)
+    assert not r["live_checked"] and r["tracked_products"] == 3      # OLD skipped for free, SEED tracked
+    assert r["products_without_history"] == 1                          # SEED: counted, not ignored
+    assert r["first_fetch_reviews"] >= 500                              # SEED's upper bound is in
+    assert r["cut_off_by_four_weekly"] == 1                             # BUSY: 4 a day > 100 per 4 weeks
+    assert "4-weekly" in estimate.table([r])
+
+    # After a first fetch, the recorded gap decides when BUSY rejoins, not a fresh plan.
+    run._record_coverage("BUSY", pd.DataFrame({"review_date": ["2026-09-20", "2026-10-14"]}), True,
+                         "2026-09-20", stored_newest="2023-09-07")
+    later = Run(study, study.company("YETI"), as_of=date(2027, 1, 20))
+    r2 = estimate.company(later)
+    assert r2["first_live_call"] == r["first_live_call"]  # doesn't slide a quarter later each quarter

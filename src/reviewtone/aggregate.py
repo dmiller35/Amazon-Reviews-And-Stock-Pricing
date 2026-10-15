@@ -20,7 +20,7 @@ change in tone. With no holes (the historical backtest) every product is used.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -115,7 +115,8 @@ def quarterly_measures(scored: pd.DataFrame, cal: FiscalCalendar, *, min_reviews
     everyone = object()  # marker: every product has a hole
     for key, windows in (gaps or {}).items():
         for i, q in zip(idx, quarters):
-            if any((gs is None or gs < q.end) and ge > q.start for gs, ge in windows):
+            # Inclusive: a window's first and last days may be only partly collected.
+            if any((gs is None or gs <= q.end) and ge >= q.start for gs, ge in windows):
                 holes[i].add(everyone if key is None else key)
     out["partial_coverage"] = [bool(holes[i]) for i in idx]
     out["partial_baseline"] = [any(holes.get(j) for j in range(i - 4, i)) for i in idx]
@@ -182,12 +183,13 @@ def quarterly_measures(scored: pd.DataFrame, cal: FiscalCalendar, *, min_reviews
     return out.reset_index()
 
 
-def coverage_gaps(coverage: pd.DataFrame, products: list[str] | None = None,
-                  dataset_end: str | None = None) -> dict[str, list[tuple[date | None, date]]]:
+def coverage_gaps(coverage: pd.DataFrame, products: list[str] | None = None, dataset_end: str | None = None,
+                  as_of: date | None = None) -> dict[str, list[tuple[date | None, date]]]:
     """Per-product windows with reviews known to be missing.
 
     - holes recorded by capped scraper fetches (coverage.csv gap_start/gap_end);
-    - after the last live fetch of a product: reviews since then are not collected yet;
+    - after the last live fetch of a product, if that was before as_of: reviews since
+      then are not collected yet;
     - after the historical dataset ends (dataset_end) for products never fetched live.
     """
     gaps: dict[str, list[tuple[date | None, date]]] = {}
@@ -200,7 +202,10 @@ def coverage_gaps(coverage: pd.DataFrame, products: list[str] | None = None,
         if "fetched_at" in coverage:
             last = pd.to_datetime(coverage["fetched_at"], errors="coerce", utc=True).groupby(coverage["asin"].astype(str)).max()
             for asin, at in last.dropna().items():
-                gaps.setdefault(asin, []).append((at.tz_convert(None).date(), date.max))
+                day = at.tz_convert(None).date()
+                # Fetched today (UTC vs local date: one day's tolerance): nothing missing yet.
+                if as_of is None or day < as_of - timedelta(days=1):
+                    gaps.setdefault(asin, []).append((day, as_of or date.max))
         fetched = set(coverage["asin"].astype(str))
     if dataset_end:
         for asin in products or []:

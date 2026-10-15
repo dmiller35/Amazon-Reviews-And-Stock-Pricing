@@ -99,6 +99,7 @@ class Run:
         products = pd.read_csv(self.dir / "products.csv", dtype=str) if (self.dir / "products.csv").exists() \
             else pd.DataFrame(columns=catalog.PRODUCT_COLUMNS)
         frames, errors = [], []
+        fetched = n_added = 0
         if source in ("mcauley", "apify") and products.empty:
             errors.append("products.csv is empty: run `reviewtone catalog --meta ...` or list ASINs in "
                           f"{self.dir / 'seed_asins.csv'} (columns: asin,brand) first")
@@ -112,7 +113,10 @@ class Run:
         elif source == "apify":
             from .sources.apify import ApifyReviews, ProductUnavailable, load_config, preflight
             client = ApifyReviews(log=self.log)
-            want = top_products or self.study.raw.get("apify", {}).get("top_products", 20)
+            acfg = self.study.raw.get("apify", {})
+            # The tone measure uses the configured top_products; fetching more would be paid for and unused.
+            want = min(top_products or acfg.get("top_products", 20), acfg.get("top_products", 20))
+            recheck = int(acfg.get("recheck_days", 30))
             try:
                 preflight(client, self.as_of)
             except SourceUnavailable as e:
@@ -121,42 +125,52 @@ class Run:
             window = int(load_config().get("live_window_days", 120))
             stored = rv.load(self.dir / "reviews.csv")
             live = 0
-            # Walk down the ranking: products Amazon no longer sells are marked
-            # dead and replaced by the next most-reviewed, so every tracked
-            # product has both historical and current reviews.
-            for p in self.tracked_products(products, top=len(products)).itertuples():
-                if live >= want:
-                    break
-                mine = stored[(stored["asin"] == p.asin) | (stored["parent_asin"] == p.asin)]
-                newest = mine["review_date"].max() if len(mine) else None
-                since = (pd.Timestamp(newest) - pd.Timedelta(days=7)).strftime("%Y-%m-%d") if newest else None
-                cutoff = (pd.Timestamp(self.as_of) - pd.Timedelta(days=window)).strftime("%Y-%m-%d")
-                try:
-                    confirmed = str(getattr(p, "live", "")) == "True" and self._checked_within(p, 14)
-                    if not (newest and newest >= cutoff) and not confirmed:
-                        # Cheap check before paying for a full fetch: is this
-                        # listing still collecting reviews?
-                        latest = client.newest_review(p.asin)
-                        if not latest or latest < cutoff:
-                            raise ProductUnavailable(f"{p.asin}: no reviews since {cutoff} (newest {latest}); "
-                                                     "listing retired or reviews moved to a newer one")
-                    sizes, back_to = self._fetch_plan(mine, max_reviews_per_product)
-                    res = client.fetch(p.asin, ticker=self.company.ticker, brand=p.brand, max_reviews=sizes,
-                                       since=since, back_to=back_to, top_up=max_reviews_per_product)
-                except ProductUnavailable as e:
-                    _mark_live(products, p.asin, False)
-                    errors.append(str(e))
-                    continue
-                except SourceUnavailable as e:
-                    errors.append(str(e))
-                    if "APIFY_TOKEN" in str(e) or "unreachable" in str(e):
+            try:
+                # Walk down the ranking: products Amazon no longer sells are marked
+                # dead and replaced by the next most-reviewed, so every tracked
+                # product has both historical and current reviews.
+                for p in self.tracked_products(products, top=len(products)).itertuples():
+                    if live >= want:
                         break
-                    continue
-                live += 1
-                _mark_live(products, p.asin, True)
-                frames.append(res.reviews.assign(parent_asin=res.reviews["parent_asin"].fillna(p.parent_asin)))
-                self._record_coverage(p.asin, res.reviews, res.hit_cap, res.complete_from, newest)
-            products.to_csv(self.dir / "products.csv", index=False)
+                    mine = stored[(stored["asin"] == p.asin) | (stored["parent_asin"] == p.asin)]
+                    newest = mine["review_date"].max() if len(mine) else None
+                    since = (pd.Timestamp(newest) - pd.Timedelta(days=7)).strftime("%Y-%m-%d") if newest else None
+                    cutoff = (pd.Timestamp(self.as_of) - pd.Timedelta(days=window)).strftime("%Y-%m-%d")
+                    try:
+                        confirmed = str(getattr(p, "live", "")) == "True" and self._checked_within(p, recheck)
+                        if not (newest and newest >= cutoff) and not confirmed:
+                            # Cheap check before paying for a full fetch: is this
+                            # listing still collecting reviews?
+                            latest = client.newest_review(p.asin)
+                            if not latest or latest < cutoff:
+                                raise ProductUnavailable(f"{p.asin}: no reviews since {cutoff} (newest {latest}); "
+                                                         "listing retired or reviews moved to a newer one")
+                        sizes, back_to = self._fetch_plan(mine, max_reviews_per_product)
+                        res = client.fetch(p.asin, ticker=self.company.ticker, brand=p.brand, max_reviews=sizes,
+                                           since=since, back_to=back_to, top_up=max_reviews_per_product)
+                    except ProductUnavailable as e:
+                        _mark_live(products, p.asin, False)
+                        errors.append(str(e))
+                        continue
+                    except SourceUnavailable as e:  # includes RunFailed: skipped this time, not retired
+                        errors.append(str(e))
+                        if "APIFY_TOKEN" in str(e) or "unreachable" in str(e):
+                            break
+                        continue
+                    live += 1
+                    got = res.reviews.assign(parent_asin=res.reviews["parent_asin"].fillna(p.parent_asin))
+                    if newest and not mine["source"].astype(str).str.startswith("apify").any():
+                        # First fetch onto the 2023 history: that period is already complete, and
+                        # re-fetched copies there can't always be matched (different IDs, short texts).
+                        got = got[got["review_date"] > newest]
+                    # Save as soon as it is paid for, so an interruption loses nothing.
+                    added_now = rv.append_new(self.dir / "reviews.csv", got) if len(got) else got
+                    fetched += len(got)
+                    n_added += len(added_now)
+                    self._record_coverage(p.asin, res.reviews, res.hit_cap, res.complete_from, newest)
+                    _mark_live(products, p.asin, True)
+            finally:
+                products.to_csv(self.dir / "products.csv", index=False)
         elif source == "csv":
             frames.append(pd.read_csv(csv_path).assign(ticker=self.company.ticker))
         else:
@@ -164,9 +178,11 @@ class Run:
 
         new = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=rv.REVIEW_COLUMNS)
         added = rv.append_new(self.dir / "reviews.csv", new) if len(new) else new
-        self.note(f"fetch_{source}", fetched=len(new), added=len(added), errors=errors[:10],
-                  n_errors=len(errors), **({"error": errors[0]} if errors and not len(new) else {}))
-        return len(added)
+        fetched += len(new)
+        n_added += len(added)
+        self.note(f"fetch_{source}", fetched=fetched, added=n_added, errors=errors[:10],
+                  n_errors=len(errors), **({"error": errors[0]} if errors and not fetched else {}))
+        return n_added
 
     def _fetch_plan(self, mine: pd.DataFrame, cap: int) -> tuple[int | dict[int, int], str | None]:
         """Request sizes and the date each star's list must reach back to (top-ups chase it).
@@ -175,8 +191,11 @@ class Run:
         product can be bridged to it, else the start of the current quarter (a gap is
         unavoidable then, and chasing 2023 would only buy reviews that can't close it).
         """
+        from .sources.apify import FIVE_STAR_CUTOFF
         newest = mine["review_date"].max() if len(mine) else None
-        if mine["source"].astype(str).str.startswith("apify").any() or not newest:
+        if not newest:
+            return cap, FIVE_STAR_CUTOFF  # no stored reviews: the five-star list sets how far back to go
+        if mine["source"].astype(str).str.startswith("apify").any():
             return self._request_sizes(mine, cap), newest
         qstart = self.cal.quarter(self.as_of).start
         sizes, bridges = first_fetch_sizes(mine, self.as_of, qstart, cap)
@@ -195,22 +214,13 @@ class Run:
         live = mine[mine["source"].astype(str).str.startswith("apify")]
         if live.empty:
             return first_fetch_sizes(mine, self.as_of, self.cal.quarter(self.as_of).start, cap)[0]
-        dates = pd.to_datetime(live["review_date"])
-        stars = pd.to_numeric(live["rating"], errors="coerce").round()
         last = pd.to_datetime(live["fetched_at"], errors="coerce", utc=True).max()
-        last = last.tz_localize(None) if pd.notna(last) else dates.max()
+        last = last.tz_localize(None) if pd.notna(last) else pd.to_datetime(live["review_date"]).max()
         days = max(1, (pd.Timestamp(self.as_of) - last).days + 2)
-        window = dates >= dates.max() - pd.Timedelta(days=180)
-        sizes = {}
-        for star in range(1, 6):
-            d = dates[window & (stars == star)]
-            # Rate over this star's own span: a list truncated at N reviews covers
-            # a short span, so N / span is the true rate, not N / 180 days.
-            rate = len(d) / max(2, (dates.max() - d.min()).days) if len(d) else 0.0
-            # Small minimum: a quiet star costs 2 reviews a week; if more arrived than
-            # expected, the fetch tops that star up instead of leaving a gap.
-            sizes[star] = int(min(cap, max(2, math.ceil(rate * days * 1.5) + 2)))
-        return sizes
+        # Small minimum: a quiet star costs 2 reviews a week; if more arrived than
+        # expected, the fetch tops that star up instead of leaving a gap.
+        return {star: int(min(cap, max(2, math.ceil(rate * days * 1.5) + 2)))
+                for star, rate in live_rates(live).items()}
 
     def check_live(self, top: int | None = None, workers: int = 2, progress: bool = True) -> dict:
         """Mark which of the most-reviewed products are still sold, without fetching them.
@@ -231,7 +241,7 @@ class Run:
         """
         from concurrent.futures import ThreadPoolExecutor
 
-        from .sources.apify import ApifyReviews, ProductUnavailable, load_config, preflight
+        from .sources.apify import ApifyReviews, ProductUnavailable, RunFailed, load_config, preflight
         path = self.dir / "products.csv"
         products = pd.read_csv(path, dtype=str) if path.exists() else pd.DataFrame(columns=catalog.PRODUCT_COLUMNS)
         for col in ("live", "live_checked_at"):
@@ -247,21 +257,9 @@ class Run:
         # Free pre-filter: unchecked products with no review in the last months
         # of the historical dataset were already retired by 2023.
         n = {"inactive": 0, "checked": 0, "paid": 0, "preflight": 0}
-        dataset_end = self._status().get("backfill_mcauley", {}).get("dataset_end")
-        if dataset_end and len(products):
-            stored = rv.load(self.dir / "reviews.csv")
-            hist = stored[stored["source"].astype(str).str.startswith("mcauley")]
-            newest = pd.concat([hist.groupby("parent_asin")["review_date"].max(),
-                                hist.groupby("asin")["review_date"].max()]).groupby(level=0).max()
-            newest = newest[newest.index != ""]
-            last = pd.concat([products["asin"].map(newest), products["parent_asin"].map(newest)], axis=1).max(axis=1)
-            active_from = (pd.Timestamp(dataset_end)
-                           - pd.Timedelta(days=int(acfg.get("history_active_days", 180)))).strftime("%Y-%m-%d")
-            unchecked = ~products["live"].astype(str).isin(["True", "False"])
-            seed = products["source"].astype(str).str.startswith("manual")
-            inactive = unchecked & ~seed & ~(last.fillna("") >= active_from)
-            products.loc[inactive, ["live", "live_checked_at"]] = ["False", utcnow()]
-            n["inactive"] = int(inactive.sum())
+        inactive = self.inactive_in_history(products)
+        products.loc[inactive, ["live", "live_checked_at"]] = ["False", utcnow()]
+        n["inactive"] = int(inactive.sum())
 
         client = ApifyReviews(log=self.log)
         ranked = self.tracked_products(products, top=len(products), include_unchecked=True)
@@ -277,7 +275,9 @@ class Run:
         def probe(asin: str) -> tuple[str, str | None, str | None, Exception | None]:
             try:
                 return asin, client.newest_review(asin), None, None
-            except ProductUnavailable:  # e.g. the listing page is gone
+            except RunFailed as e:  # temporary: leave the product unchecked
+                return asin, None, f"check failed ({e})", None
+            except ProductUnavailable:
                 return asin, None, "listing unreadable", None
             except SourceUnavailable as e:  # Apify itself unavailable (e.g. credit used up)
                 return asin, None, None, e
@@ -296,6 +296,9 @@ class Run:
                 if fail:
                     continue
                 n["paid"] += 1
+                if err and err.startswith("check failed"):
+                    say(f"{asin} {err}; left unchecked, a later check-live retries it")
+                    continue
                 ok = bool(latest and latest >= cutoff)
                 _mark_live(products, asin, ok)
                 (live if ok else dead).append(asin if ok else f"{asin} (newest {latest or err})")
@@ -327,6 +330,26 @@ class Run:
                 "cutoff": cutoff}
         self.note("check_live", **info)
         return info
+
+    def inactive_in_history(self, products: pd.DataFrame) -> pd.Series:
+        """Unchecked, non-seed products with no review in the historical dataset's last
+        `history_active_days` days: already retired by 2023 (free to tell)."""
+        none = pd.Series(False, index=products.index)
+        dataset_end = self._status().get("backfill_mcauley", {}).get("dataset_end")
+        if not dataset_end or products.empty:
+            return none
+        stored = rv.load(self.dir / "reviews.csv")
+        hist = stored[stored["source"].astype(str).str.startswith("mcauley")]
+        newest = pd.concat([hist.groupby("parent_asin")["review_date"].max(),
+                            hist.groupby("asin")["review_date"].max()]).groupby(level=0).max()
+        newest = newest[newest.index != ""]
+        last = pd.concat([products["asin"].map(newest), products["parent_asin"].map(newest)], axis=1).max(axis=1)
+        days = int(self.study.raw.get("apify", {}).get("history_active_days", 180))
+        active_from = (pd.Timestamp(dataset_end) - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
+        status = products["live"].astype(str) if "live" in products else pd.Series("", index=products.index)
+        unchecked = ~status.isin(["True", "False"])
+        seed = products["source"].astype(str).str.startswith("manual")
+        return unchecked & ~seed & ~(last.fillna("") >= active_from)
 
     def _checked_within(self, row, days: int) -> bool:
         at = pd.to_datetime(getattr(row, "live_checked_at", None), errors="coerce", utc=True)
@@ -426,7 +449,9 @@ class Run:
         cov_path = self.dir / "coverage.csv"
         coverage = pd.read_csv(cov_path, dtype={"asin": str}) if cov_path.exists() else pd.DataFrame()
         dataset_end = self._status().get("backfill_mcauley", {}).get("dataset_end")
-        gaps = aggregate.coverage_gaps(coverage, list(prods["asin"].astype(str)), dataset_end)
+        keys = list(prods["asin"].astype(str))
+        gaps = aggregate.coverage_gaps(coverage, keys, dataset_end, as_of=self.as_of)
+        gaps = {k: v for k, v in gaps.items() if k in set(keys)}  # products no longer tracked don't count
         q = aggregate.quarterly_measures(scored, cal or self.cal,
                                          min_reviews=self.study.aggregation["min_reviews_per_quarter"],
                                          as_of=self.as_of, gaps=gaps)
@@ -502,6 +527,22 @@ class Run:
         return dest
 
 
+def live_rates(live: pd.DataFrame) -> dict[int, float]:
+    """Reviews per day by star from a product's live (scraped) reviews of the last 180 days.
+
+    Each star's rate is measured over that star's own span: a list truncated at
+    N reviews covers a short span, so N / span is the true rate, not N / 180 days.
+    """
+    dates = pd.to_datetime(live["review_date"])
+    stars = pd.to_numeric(live["rating"], errors="coerce").round()
+    window = dates >= dates.max() - pd.Timedelta(days=180)
+    rates = {}
+    for star in range(1, 6):
+        d = dates[window & (stars == star)]
+        rates[star] = len(d) / max(2, (dates.max() - d.min()).days) if len(d) else 0.0
+    return rates
+
+
 def history_rates(mine: pd.DataFrame) -> dict[int, float]:
     """Reviews per day by star from a product's stored history.
 
@@ -525,8 +566,8 @@ def first_fetch_sizes(mine: pd.DataFrame, as_of: date, quarter_start: date,
 
     The scraper returns only the newest `cap` reviews per star. Rates come from
     the product's last year of stored (historical) reviews:
-    - if every star's reviews since the history ends fit within the cap, ask for
-      just enough to reach back to it (1.5x the expected count + 5): no gap;
+    - if every star's expected reviews since the history ends are under 70% of the
+      cap, ask for enough to reach back to it (1.5x expected + 5, at most the cap);
     - otherwise a gap is unavoidable (the product rejoins the tone measure after
       five complete quarters, see aggregate), so only the current quarter is
       collected: enough to reach back to its start, which makes it complete.
@@ -540,9 +581,9 @@ def first_fetch_sizes(mine: pd.DataFrame, as_of: date, quarter_start: date,
     def sizes(days: int) -> dict[int, int]:
         return {s: int(min(cap, max(5, math.ceil(rate[s] * days * 1.5) + 5))) for s in range(1, 6)}
 
-    bridge = sizes(max(1, (pd.Timestamp(as_of) - newest).days + 2))
-    if all(n < cap for n in bridge.values()):
-        return bridge, True
+    days = max(1, (pd.Timestamp(as_of) - newest).days + 2)
+    if all(rate[s] * days < 0.7 * cap for s in range(1, 6)):  # expected count fits, with headroom
+        return sizes(days), True
     return sizes(max(1, (pd.Timestamp(as_of) - pd.Timestamp(quarter_start)).days + 2)), False
 
 

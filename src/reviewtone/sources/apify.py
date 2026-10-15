@@ -223,7 +223,17 @@ def resolve_profile(actor: str | None = None, config: Path = CONFIG) -> tuple[st
 
 
 class ProductUnavailable(SourceUnavailable):
-    """The actor could not read this product (delisted, merged or invalid ASIN)."""
+    """The product is not usable live (e.g. no recent reviews: retired listing)."""
+
+
+class RunFailed(SourceUnavailable):
+    """One actor run failed or timed out (Amazon blocking, actor crash). Temporary:
+    the product is skipped this time, never retired for it."""
+
+
+# back_to value for a product with no stored reviews: fetch five-star first and
+# chase the other stars only back to where the five-star list ends.
+FIVE_STAR_CUTOFF = "five-star-cutoff"
 
 
 @dataclass
@@ -288,10 +298,13 @@ class ApifyReviews:
         while run["status"] in ("READY", "RUNNING") and time.time() < deadline:
             run = self._call("GET", f"/actor-runs/{run['id']}", params={"waitForFinish": 60}).json()["data"]
         self.log.record(source="apify", actor=self.actor, asin=asin, run=run["id"], status=run["status"])
+        if run["status"] in ("READY", "RUNNING"):
+            self._call("POST", f"/actor-runs/{run['id']}/abort")  # stop it charging
+            raise RunFailed(f"{asin}: actor run timed out after {timeout_s}s and was aborted")
         if run["status"] != "SUCCEEDED":
-            # Readable products succeed even with zero reviews; a failed run means
-            # the actor could not read the product (delisted, merged or invalid).
-            raise ProductUnavailable(f"{asin}: actor run {run['status']} (product delisted or unreadable?)")
+            # Retired listings still succeed (with old or no reviews); a failed run is
+            # usually temporary, so it never retires the product.
+            raise RunFailed(f"{asin}: actor run {run['status']}")
         return self._call("GET", f"/datasets/{run['defaultDatasetId']}/items", params={"clean": "true"}).json()
 
     def newest_review(self, asin: str) -> str | None:
@@ -315,24 +328,53 @@ class ApifyReviews:
         """
         if not self.token:
             raise SourceUnavailable("APIFY_TOKEN is not set; cannot run the Apify review scraper.")
-        payloads = self.profile.payloads(asin, max_reviews, since)
-        batches = [self.run(payload, asin=asin, timeout_s=timeout_s) for payload in payloads]
-        split = self.profile.by_star and len(payloads) == len(STARS)
-        sizes = self.profile.cap(max_reviews)
-        size = (lambda star: sizes.get(star, max(sizes.values()))) if isinstance(sizes, dict) else (lambda star: sizes)
-        if split:
-            sizes = {star: size(star) for star in range(1, len(STARS) + 1)}
-            for i, batch in enumerate(batches):
-                star = i + 1
-                if not (back_to and top_up and len(batch) >= sizes[star] and sizes[star] < top_up):
-                    continue
-                d, _ = normalize_items(batch, ticker=ticker, brand=brand, fetched_at="")
-                if len(d) and d["review_date"].min() <= back_to:
-                    continue  # reached what is stored: complete
-                bigger = {**sizes, star: top_up}
-                batches[i] = self.run(self.profile.payloads(asin, bigger, since)[i], asin=asin, timeout_s=timeout_s)
-                sizes = {**sizes, star: self.profile.cap(bigger)[star]}
-                self.log.record(source="apify", kind="top_up", asin=asin, star=star, size=top_up)
+        n_stars = len(STARS)
+        split = self.profile.by_star and len(self.profile.payloads(asin, 1, since)) == n_stars
+        if isinstance(max_reviews, dict) and not split:
+            max_reviews = max(max_reviews.values())  # actor takes one size for all stars
+        caps = self.profile.cap(max_reviews)
+        sizes = ({star: caps.get(star, max(caps.values())) for star in range(1, n_stars + 1)}
+                 if isinstance(caps, dict) else {star: caps for star in range(1, n_stars + 1)})
+
+        def run_star(star: int, n: int) -> list[dict[str, Any]]:
+            return self.run(self.profile.payloads(asin, {**sizes, star: n}, since)[star - 1], asin=asin,
+                            timeout_s=timeout_s)
+
+        def oldest(batch: list[dict[str, Any]]) -> str | None:
+            d, _ = normalize_items(batch, ticker=ticker, brand=brand, fetched_at="")
+            return d["review_date"].min() if len(d) else None
+
+        if not split:
+            batches = [self.run(payload, asin=asin, timeout_s=timeout_s)
+                       for payload in self.profile.payloads(asin, max_reviews, since)]
+        else:
+            batches: list[list[dict[str, Any]]] = [[] for _ in range(n_stars)]
+            order = list(range(1, n_stars + 1))
+            if back_to == FIVE_STAR_CUTOFF:
+                # No stored history: the busiest list (five-star) decides how far back the
+                # product can be complete; older reviews of other stars could never be used.
+                batches[n_stars - 1] = run_star(n_stars, sizes[n_stars])
+                full = len(batches[n_stars - 1]) >= sizes[n_stars]
+                back_to = oldest(batches[n_stars - 1]) if full else None
+                if full and top_up:
+                    sizes = {**{st: min(sizes[st], 10) for st in range(1, n_stars)}, n_stars: sizes[n_stars]}
+                order = order[:-1]
+            for star in order:
+                batches[star - 1] = run_star(star, sizes[star])
+            for star in range(1, n_stars + 1):
+                # Top up a list that filled before reaching back_to: first to 4x, then to the cap.
+                while back_to and top_up and len(batches[star - 1]) >= sizes[star] and sizes[star] < top_up:
+                    first = oldest(batches[star - 1])
+                    if first is not None and first <= back_to:
+                        break  # reached what is needed: complete
+                    n = min(top_up, max(4 * sizes[star], sizes[star] + 10))
+                    try:
+                        batch = run_star(star, n)
+                    except RunFailed as e:  # keep the list already paid for; it is recorded as cut off
+                        self.log.record(source="apify", kind="top_up_failed", asin=asin, star=star, error=str(e))
+                        break
+                    batches[star - 1], sizes = batch, {**sizes, star: self.profile.cap({**sizes, star: n})[star]}
+                    self.log.record(source="apify", kind="top_up", asin=asin, star=star, size=n)
         items = [x for batch in batches for x in batch]
         df, unmapped = normalize_items(items, ticker=ticker, brand=brand, fetched_at=utcnow())
         if len(df):
@@ -342,7 +384,7 @@ class ApifyReviews:
             # marketplaces are dropped after, and must not make a cut list look complete.
             cut = []
             for i, batch in enumerate(batches):
-                if len(batch) >= sizes[i + 1]:
+                if batch and len(batch) >= sizes[i + 1]:
                     d, _ = normalize_items(batch, ticker=ticker, brand=brand, fetched_at="")
                     cut.append(d["review_date"].min() if len(d) else utcnow()[:10])
             hit_cap, complete_from = bool(cut), (max(cut) if cut else None)
@@ -366,6 +408,9 @@ def preflight(client: ApifyReviews, as_of: Any, config: Path = CONFIG) -> str:
     asin = cfg.get("check_asin")
     if not asin:
         return "skipped"
+    key = (client.actor, str(as_of))
+    if key in _PREFLIGHT_PASSED:  # once per actor and day, not once per company
+        return _PREFLIGHT_PASSED[key]
     window = int(cfg.get("live_window_days", 120))
     latest = client.newest_review(asin)
     cutoff = (pd.Timestamp(as_of) - pd.Timedelta(days=window)).strftime("%Y-%m-%d")
@@ -374,4 +419,8 @@ def preflight(client: ApifyReviews, as_of: Any, config: Path = CONFIG) -> str:
             f"Preflight failed: actor {client.actor} returned no recent reviews for check_asin {asin} "
             f"(newest: {latest}). The actor may need a paid Apify plan, its input format may have changed, "
             "or check_asin is no longer sold. See config/apify.yaml.")
+    _PREFLIGHT_PASSED[key] = latest
     return latest
+
+
+_PREFLIGHT_PASSED: dict[tuple[str, str], str] = {}
