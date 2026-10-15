@@ -434,3 +434,55 @@ def test_apify_402_stops_with_clear_message(monkeypatch):
     monkeypatch.setenv("APIFY_TOKEN", "t")
     with pytest.raises(apify.SourceUnavailable, match="unreachable: HTTP 402"):
         apify.ApifyReviews().run({"x": 1}, asin="A")
+
+
+def test_claude_scorer_through_real_sdk_http(monkeypatch):
+    """Real anthropic SDK over HTTP against a local stand-in API: request shape, parsing, usage, cost."""
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    import anthropic
+
+    from reviewtone.tone.claude import ClaudeToneScorer
+
+    seen = []
+
+    class FakeAPI(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = _json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            seen.append((self.path, body))
+            items = _json.loads(body["messages"][0]["content"])
+            scores = [{"id": it["id"], "tone": -2 if "broke" in it["text"] else 2, "tags": ["defect"],
+                       "seller_shipping_only": False, "reason": "x"} for it in items]
+            out = _json.dumps({"id": "msg_1", "type": "message", "role": "assistant", "model": body["model"],
+                               "content": [{"type": "text", "text": _json.dumps({"scores": scores})}],
+                               "stop_reason": "end_turn", "stop_sequence": None,
+                               "usage": {"input_tokens": 1000, "output_tokens": 400}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), FakeAPI)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        client = anthropic.Anthropic(api_key="test", base_url=f"http://127.0.0.1:{server.server_port}", max_retries=0)
+        scorer = ClaudeToneScorer(model="claude-haiku-5-5", effort="low", reviews_per_request=2, client=client)
+        reviews = pd.DataFrame({"review_id": ["a", "b", "c"], "title": ["Great", "Bad", "Ok"],
+                                "text": ["love it", "it broke in a week", "fine"]})
+        out = scorer.score(reviews, progress=False)
+    finally:
+        server.shutdown()
+    path, body = seen[0]
+    assert path == "/v1/messages" and len(seen) == 2  # 3 reviews in batches of 2
+    assert body["model"] == "claude-haiku-5-5" and "fallbacks" not in body
+    assert body["output_config"]["effort"] == "low" and body["output_config"]["format"]["type"] == "json_schema"
+    assert "rating" not in _json.dumps(body["messages"])  # star rating never shown to the scorer
+    assert out.set_index("review_id")["tone_raw"].to_dict() == {"a": 2, "b": -2, "c": 2}
+    assert scorer.tokens == {"input": 2000, "output": 800}
+    assert abs(scorer.cost() - (2000 * 0.10 + 800 * 0.50) / 1e6) < 1e-12

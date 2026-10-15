@@ -280,8 +280,8 @@ class Run:
                 ok = bool(latest and latest >= cutoff)
                 _mark_live(products, asin, ok)
                 (live if ok else dead).append(asin if ok else f"{asin} (newest {latest or err})")
-                say(f"{asin} {'LIVE' if ok else 'retired'} (newest review {latest or err or 'none'})"
-                    f"  [{len(live)}/{want} live]")
+                state = "LIVE" if ok else ("retired" if latest else "no reviews available to the scraper")
+                say(f"{asin} {state} (newest review {latest or err or 'none'})  [{len(live)}/{want} live]")
             products.to_csv(path, index=False)
             if failure:
                 raise failure  # results that came back are saved first

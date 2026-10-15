@@ -21,6 +21,10 @@ SYSTEM = (
 # Models that accept the server-side refusal fallback (Haiku does not).
 FALLBACK_MODELS = ("claude-fable-5", "claude-opus-5", "claude-sonnet-5-5")
 
+# USD per million input / output tokens (Anthropic list prices), used only for
+# the running cost shown while scoring. Billing is on console.anthropic.com.
+PRICES = {"claude-haiku-5-5": (0.10, 0.50), "claude-sonnet-5-5": (2.00, 10.00), "claude-opus-5-5": (4.00, 20.00)}
+
 
 class ClaudeScorerError(RuntimeError):
     pass
@@ -36,6 +40,11 @@ class ClaudeToneScorer:
         self.batch = reviews_per_request
         self.include_body = include_body
         self.client = client or anthropic.Anthropic(max_retries=5)
+        self.tokens = {"input": 0, "output": 0}
+
+    def cost(self) -> float | None:
+        price = PRICES.get(self.model)
+        return None if price is None else (self.tokens["input"] * price[0] + self.tokens["output"] * price[1]) / 1e6
 
     def _request(self, items: list[dict[str, str]]) -> Any:
         params: dict[str, Any] = dict(
@@ -63,6 +72,10 @@ class ClaudeToneScorer:
             raise ClaudeScorerError("Claude API authentication failed; set ANTHROPIC_API_KEY.") from e
         except anthropic.APIConnectionError as e:
             raise ClaudeScorerError(f"Claude API unreachable: {e}") from e
+        usage = getattr(resp, "usage", None)
+        if usage is not None:  # every response is billed, including refusals and truncated ones
+            self.tokens["input"] += int(getattr(usage, "input_tokens", 0) or 0)
+            self.tokens["output"] += int(getattr(usage, "output_tokens", 0) or 0)
 
         if resp.stop_reason == "max_tokens" and len(chunk) > 1:
             half = len(chunk) // 2
@@ -102,7 +115,10 @@ class ClaudeToneScorer:
         for start in range(0, len(reviews), self.batch):
             rows.extend(self._score_chunk(reviews.iloc[start:start + self.batch]))
             if progress:
-                print(f"  scored {min(start + self.batch, len(reviews))}/{len(reviews)} reviews", flush=True)
+                cost = self.cost()
+                print(f"  scored {min(start + self.batch, len(reviews))}/{len(reviews)} reviews "
+                      f"({self.tokens['input']:,} input + {self.tokens['output']:,} output tokens"
+                      + (f", about ${cost:.3f} so far)" if cost is not None else ")"), flush=True)
         out = pd.DataFrame(rows)
         out["scorer"], out["model"], out["rubric_version"], out["scored_at"] = (
             self.name, self.model, RUBRIC_VERSION, utcnow())
