@@ -177,7 +177,8 @@ def test_check_live_marks_retired_products_before_the_study_locks(study, monkeyp
     run = Run(study, study.company("YETI"), as_of=date(2026, 10, 14))
     pd.DataFrame({"ticker": "YETI", "brand": "YETI", "asin": ["OLD", "NEW", "MID", "LOW"],
                   "parent_asin": ["OLD", "NEW", "MID", "LOW"], "rating_number": ["900", "800", "700", "10"],
-                  "source": "mcauley2023:x"}).to_csv(run.dir / "products.csv", index=False)
+                  "source": "mcauley2023:x", "live": "", "live_checked_at": ""}  # empty, as backfill writes them
+                 ).to_csv(run.dir / "products.csv", index=False)
     newest = {"B07SGPJBZ6": "2026-10-10", "OLD": "2021-03-01", "NEW": "2026-10-01", "MID": "2026-09-20"}
     asked = []
 
@@ -191,3 +192,43 @@ def test_check_live_marks_retired_products_before_the_study_locks(study, monkeyp
     assert info["live"] == ["NEW", "MID"] and info["retired"] == ["OLD (newest 2021-03-01)"]
     assert "LOW" not in asked  # stops once enough live products are found
     assert run.tracked_products(top=2)["asin"].tolist() == ["NEW", "MID"]
+
+
+def test_real_workflow_check_live_label_sample_then_naive_bayes(study, world, monkeypatch):
+    """backfill output -> check-live -> Claude-labelled sample -> run with the default scorer."""
+    from reviewtone import catalog, reviews as rv
+    from reviewtone.pipeline import Run
+    from reviewtone.sources import apify
+    from reviewtone.tone.lexicon import LexiconToneScorer
+
+    reviews, facts, subs, quarters, _ = world
+    monkeypatch.setattr("reviewtone.fundamentals.sec.resolve_cik", lambda t, log=None: 1032975)
+    monkeypatch.setattr("reviewtone.fundamentals.sec.fetch_companyfacts", lambda cik, log=None: facts)
+    monkeypatch.setattr("reviewtone.fundamentals.sec.fetch_submissions", lambda cik, log=None: subs)
+    as_of = quarters[-1].end
+    run = Run(study, study.company("LOGI"), as_of=as_of)
+    products, _ = catalog.merge_products(pd.DataFrame({
+        "ticker": "LOGI", "brand": "Logitech", "asin": ["B000TEST01", "RETIRED"], "parent_asin": ["B000TEST01", "RETIRED"],
+        "rating_number": [500, 900], "official_store": True, "source": "mcauley2023:Electronics"}))
+    products.to_csv(run.dir / "products.csv", index=False)  # as backfill writes it: empty live columns
+    rv.append_new(run.dir / "reviews.csv", reviews.assign(source="mcauley2023:Electronics"))
+
+    monkeypatch.setenv("APIFY_TOKEN", "t")
+    newest = {"B07SGPJBZ6": as_of.isoformat(), "B000TEST01": as_of.isoformat(), "RETIRED": "2019-01-01"}
+    monkeypatch.setattr(apify.ApifyReviews, "newest_review", lambda self, asin: newest[asin])
+    assert run.check_live()["live"] == ["B000TEST01"]
+
+    class FakeClaude(LexiconToneScorer):
+        name = "claude"
+
+        def __init__(self, **kw):
+            self.model = "fake"
+
+    monkeypatch.setattr("reviewtone.tone.claude.ClaudeToneScorer", FakeClaude)
+    assert len(run.score(scorer="claude", sample=400)) == 400
+
+    card = run_company(study, "LOGI", source=None, factors=None, as_of=as_of)  # default scorer: naive_bayes
+    d = study.ticker_dir("LOGI")
+    assert len(pd.read_csv(d / "scores_naive_bayes.csv")) == len(reviews)
+    assert (d / "quarterly.csv").exists() and (d / "evaluation.json").exists()
+    assert card["signal_quarter"] == quarters[-1].label

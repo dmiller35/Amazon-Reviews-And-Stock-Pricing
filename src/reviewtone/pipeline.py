@@ -141,7 +141,7 @@ class Run:
                     res = client.fetch(p.asin, ticker=self.company.ticker, brand=p.brand,
                                        max_reviews=self._request_sizes(mine, max_reviews_per_product), since=since)
                 except ProductUnavailable as e:
-                    products.loc[products["asin"] == p.asin, ["live", "live_checked_at"]] = [False, utcnow()]
+                    _mark_live(products, p.asin, False)
                     errors.append(str(e))
                     continue
                 except SourceUnavailable as e:
@@ -150,7 +150,7 @@ class Run:
                         break
                     continue
                 live += 1
-                products.loc[products["asin"] == p.asin, ["live", "live_checked_at"]] = [True, utcnow()]
+                _mark_live(products, p.asin, True)
                 frames.append(res.reviews.assign(parent_asin=res.reviews["parent_asin"].fillna(p.parent_asin)))
                 self._record_coverage(p.asin, res.reviews, res.hit_cap, res.complete_from, newest)
             products.to_csv(self.dir / "products.csv", index=False)
@@ -217,7 +217,7 @@ class Run:
             except ProductUnavailable as e:  # e.g. the listing page is gone
                 latest, err = None, str(e)
             ok = bool(latest and latest >= cutoff)
-            products.loc[products["asin"] == p.asin, ["live", "live_checked_at"]] = [ok, utcnow()]
+            _mark_live(products, p.asin, ok)
             (live if ok else dead).append(p.asin if ok else f"{p.asin} (newest {latest or err})")
         products.to_csv(path, index=False)
         info = {"live": live, "retired": dead, "wanted": want, "cutoff": cutoff}
@@ -371,6 +371,12 @@ class Run:
             if (self.dir / name).exists():
                 shutil.copy2(self.dir / name, dest / name)
         return dest
+
+
+def _mark_live(products: pd.DataFrame, asin: str, live: bool) -> None:
+    # Stored as text: products.csv is read with dtype=str, and pandas 3 string
+    # columns reject booleans.
+    products.loc[products["asin"] == asin, ["live", "live_checked_at"]] = [str(live), utcnow()]
 
 
 def backfill(study: Study, tickers: list[str], categories: list[str] | None = None,
