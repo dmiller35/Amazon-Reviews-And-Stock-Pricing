@@ -302,7 +302,8 @@ def _apify_world(study, monkeypatch, behaviour):
     monkeypatch.setenv("APIFY_TOKEN", "t")
     monkeypatch.setattr(apify, "preflight", lambda client, as_of, config=None: "2026-10-10")
 
-    def fake_fetch(self, asin, *, ticker, brand, max_reviews=100, since=None, timeout_s=900, back_to=None, top_up=None):
+    def fake_fetch(self, asin, *, ticker, brand, max_reviews=100, since=None, timeout_s=900, back_to=None, top_up=None,
+                   stars=None):
         return behaviour(asin, ticker, brand)
 
     monkeypatch.setattr(apify.ApifyReviews, "fetch", fake_fetch)
@@ -353,7 +354,7 @@ def test_same_day_fetch_keeps_the_current_quarter_visible(study, monkeypatch):
     assert current["n_products_excluded"] == 0  # fetched today and not cut off: nothing missing
 
 
-def test_product_without_history_buys_other_stars_only_back_to_the_five_star_cutoff(monkeypatch):
+def test_product_without_history_buys_other_stars_only_back_to_the_busiest_star_cutoff(monkeypatch):
     from reviewtone.sources import apify
 
     monkeypatch.setenv("APIFY_TOKEN", "t")
@@ -376,7 +377,7 @@ def test_product_without_history_buys_other_stars_only_back_to_the_five_star_cut
         return out
 
     monkeypatch.setattr(client, "run", run)
-    res = client.fetch("S", ticker="T", brand="B", max_reviews=100, back_to=apify.FIVE_STAR_CUTOFF, top_up=100)
+    res = client.fetch("S", ticker="T", brand="B", max_reviews=100, back_to=apify.BUSIEST_STAR_CUTOFF, top_up=100)
     assert calls[0] == (5, 100)                          # busiest list first: covers ~50 days
     assert all(n <= 40 for star, n in calls[1:])          # others only as deep as that (10, topped up if needed)
     assert len(res.reviews) < 200                        # not 5 x 100

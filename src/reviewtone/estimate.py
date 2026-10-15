@@ -3,8 +3,9 @@
 For each company's tracked products, review rates per star come from the last
 year of the historical dataset. From them:
 
-- first live fetch: sized by pipeline.first_fetch_sizes (bridge to the history
-  when possible, else only the current quarter); charged per review returned;
+- first live fetch: sized by pipeline.first_fetch_plan (back to the history, back
+  five quarters, or only this quarter: the deepest that is affordable); charged per
+  review returned; only the star ratings in the study's `aggregation.stars`;
 - updates (weekly or every 4 weeks): request sizes follow Run._request_sizes; a
   product with more new reviews of one star between updates than one request
   holds (100) is cut off every time and never enters the tone measure;
@@ -36,7 +37,7 @@ STARS = (1, 2, 3, 4, 5)
 
 def company(run, cap: int = 100, label_sample: int = 1000) -> dict:
     """Estimates for one company (a pipeline.Run)."""
-    from .pipeline import first_fetch_sizes, history_rates, live_rates
+    from .pipeline import first_fetch_plan, history_rates, live_rates
 
     cfg = load_config()
     price = float(cfg.get("price_per_review", 0.0018))
@@ -70,6 +71,7 @@ def company(run, cap: int = 100, label_sample: int = 1000) -> dict:
                if "gap_end" in cov and len(cov) else pd.Series(dtype=str))
 
     cal = run.cal
+    stars = run.study.stars
     this_q = cal.quarter(run.as_of)
     days_into_q = (pd.Timestamp(run.as_of) - pd.Timestamp(this_q.start)).days + 1
     first_reviews = 0.0
@@ -84,9 +86,9 @@ def company(run, cap: int = 100, label_sample: int = 1000) -> dict:
             # updates; it can't be placed on the timeline.
             no_history += 1
             if p.asin not in live_done:
-                first_reviews += 5 * cap
-            update["weekly"] += 10
-            update["four_weekly"] += 10
+                first_reviews += len(stars) * cap
+            update["weekly"] += 2 * len(stars)
+            update["four_weekly"] += 2 * len(stars)
             continue
         rate = history_rates(mine)
         live = reviews[((reviews["parent_asin"] == p.asin) | (reviews["asin"] == p.asin))
@@ -98,21 +100,25 @@ def company(run, cap: int = 100, label_sample: int = 1000) -> dict:
             gap = p.asin in gap_end.index
             clean_from = cal.quarter(date.fromisoformat(str(gap_end[p.asin]))).shift(1) if gap else None
         else:
-            sizes, bridges = first_fetch_sizes(mine, run.as_of, this_q.start, cap)
-            first_reviews += sum(min(sizes[s] if isinstance(sizes, dict) else sizes, available[s]) for s in STARS)
-            gap = not bridges
-            # A busy star's capped list may not reach back to this quarter's start.
-            late = any(rate[s] > 0 and cap / rate[s] < days_into_q for s in STARS)
-            clean_from = this_q.shift(1) if late else this_q
+            sizes, _, reach = first_fetch_plan(mine, run.as_of, cal, cap, stars)
+            first_reviews += sum(min(sizes[s], available[s]) for s in stars)
+            gap = reach != "history"
+            if reach == "five_quarters":
+                clean_from = this_q.shift(-5)
+            else:
+                # A busy star's capped list may not reach back to this quarter's start.
+                late = any(rate[s] > 0 and cap / rate[s] < days_into_q for s in stars)
+                clean_from = this_q.shift(1) if late else this_q
         for days, key in ((7, "weekly"), (28, "four_weekly")):  # sizes as Run._request_sizes
-            req = {s: min(cap, max(2, math.ceil(rate[s] * (days + 2) * 1.5) + 2)) for s in STARS}
-            update[key] += sum(min(req[s], available[s]) for s in STARS)
-        per_quarter += sum(rate.values()) * 91
+            req = {s: min(cap, max(2, math.ceil(rate[s] * (days + 2) * 1.5) + 2)) for s in stars}
+            update[key] += sum(min(req[s], available[s]) for s in stars)
+        q_reviews = sum(rate[s] for s in stars) * 91
+        per_quarter += q_reviews
         products_out.append({
-            "asin": p.asin, "per_quarter": sum(rate.values()) * 91, "gap": gap, "clean_from": clean_from,
+            "asin": p.asin, "per_quarter": q_reviews, "gap": gap, "clean_from": clean_from,
             # more new reviews of one star between updates than one request can hold: cut off every time
-            "cut_off_weekly": any(rate[s] * 9 >= cap for s in STARS),
-            "cut_off_four_weekly": any(rate[s] * 30 >= cap for s in STARS)})
+            "cut_off_weekly": any(rate[s] * 9 >= cap for s in stars),
+            "cut_off_four_weekly": any(rate[s] * 30 >= cap for s in stars)})
 
     out.update({
         "reviews_per_quarter": round(per_quarter),
@@ -197,8 +203,8 @@ def _notes(r: dict) -> str:
         notes.append(f"{r['cut_off_by_four_weekly']} product(s) too busy for 4-weekly updates "
                      f"(4-weekly first call: {r['first_live_call_four_weekly']})")
     if r["products_without_history"]:
-        notes.append(f"{r['products_without_history']} without history: first fetch counted at up to 500 "
-                     "reviews each, not on the timeline")
+        notes.append(f"{r['products_without_history']} without history: first fetch counted at up to 100 "
+                     "reviews per star each, not on the timeline")
     return "; ".join(notes) or "-"
 
 

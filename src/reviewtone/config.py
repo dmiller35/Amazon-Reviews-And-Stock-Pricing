@@ -58,6 +58,11 @@ class Study:
         return self.raw["study"]["primary_ticker"]
 
     @property
+    def stars(self) -> tuple[int, ...]:
+        """Star ratings whose reviews form the tone measure (and are scraped live)."""
+        return tuple(sorted(int(x) for x in self.raw["aggregation"].get("stars", [1, 2, 3, 4, 5])))
+
+    @property
     def research_dir(self) -> Path:
         d = Path(self.raw["study"].get("research_dir", "research"))
         return d if d.is_absolute() else self.path.parent.parent / d
@@ -111,6 +116,7 @@ class Study:
             "portfolio": self.raw["portfolio"],
             "min_reviews_per_quarter": self.raw["aggregation"]["min_reviews_per_quarter"],
             "product_scope": self.raw["aggregation"].get("product_scope", "tracked"),
+            "stars": list(self.stars),
             "top_products": self.raw.get("apify", {}).get("top_products", 20),
         }
         blob = json.dumps(locked, sort_keys=True).encode()

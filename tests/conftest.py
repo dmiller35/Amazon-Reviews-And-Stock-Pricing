@@ -24,6 +24,7 @@ def study(tmp_path):
     cfg = yaml.safe_load((ROOT / "config" / "study.yaml").read_text())
     cfg["study"]["research_dir"] = str(tmp_path / "research")
     cfg["aggregation"]["min_reviews_per_quarter"] = 20
+    cfg["aggregation"]["stars"] = [1, 2, 3, 4, 5]  # synthetic worlds use every star; 1-4 has its own tests
     shutil.copytree(ROOT / "config" / "companies", tmp_path / "config" / "companies")
     p = tmp_path / "config" / "study.yaml"
     p.write_text(yaml.safe_dump(cfg))

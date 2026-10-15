@@ -147,7 +147,8 @@ class Run:
                                                          "listing retired or reviews moved to a newer one")
                         sizes, back_to = self._fetch_plan(mine, max_reviews_per_product)
                         res = client.fetch(p.asin, ticker=self.company.ticker, brand=p.brand, max_reviews=sizes,
-                                           since=since, back_to=back_to, top_up=max_reviews_per_product)
+                                           since=since, back_to=back_to, top_up=max_reviews_per_product,
+                                           stars=self.study.stars)
                     except ProductUnavailable as e:
                         _mark_live(products, p.asin, False)
                         errors.append(str(e))
@@ -187,19 +188,18 @@ class Run:
     def _fetch_plan(self, mine: pd.DataFrame, cap: int) -> tuple[int | dict[int, int], str | None]:
         """Request sizes and the date each star's list must reach back to (top-ups chase it).
 
-        Weekly: the newest stored review. First fetch: the end of the history if the
-        product can be bridged to it, else the start of the current quarter (a gap is
-        unavoidable then, and chasing 2023 would only buy reviews that can't close it).
+        Weekly: the newest stored review. First fetch: as far back as first_fetch_plan
+        finds affordable (the history, five quarters, or this quarter); chasing further
+        would only buy reviews that can't close the gap.
         """
-        from .sources.apify import FIVE_STAR_CUTOFF
+        from .sources.apify import BUSIEST_STAR_CUTOFF
         newest = mine["review_date"].max() if len(mine) else None
         if not newest:
-            return cap, FIVE_STAR_CUTOFF  # no stored reviews: the five-star list sets how far back to go
+            return cap, BUSIEST_STAR_CUTOFF  # no stored reviews: the busiest list sets how far back to go
         if mine["source"].astype(str).str.startswith("apify").any():
             return self._request_sizes(mine, cap), newest
-        qstart = self.cal.quarter(self.as_of).start
-        sizes, bridges = first_fetch_sizes(mine, self.as_of, qstart, cap)
-        return sizes, (newest if bridges else qstart.isoformat())
+        sizes, back_to, _ = first_fetch_plan(mine, self.as_of, self.cal, cap, self.study.stars)
+        return sizes, back_to
 
     def _request_sizes(self, mine: pd.DataFrame, cap: int) -> int | dict[int, int]:
         """Per-star request sizes for a product already followed live.
@@ -213,7 +213,7 @@ class Run:
         """
         live = mine[mine["source"].astype(str).str.startswith("apify")]
         if live.empty:
-            return first_fetch_sizes(mine, self.as_of, self.cal.quarter(self.as_of).start, cap)[0]
+            return first_fetch_plan(mine, self.as_of, self.cal, cap, self.study.stars)[0] if len(mine) else cap
         last = pd.to_datetime(live["fetched_at"], errors="coerce", utc=True).max()
         last = last.tz_localize(None) if pd.notna(last) else pd.to_datetime(live["review_date"]).max()
         days = max(1, (pd.Timestamp(self.as_of) - last).days + 2)
@@ -413,8 +413,9 @@ class Run:
             # Label the reviews the measure is built from (the tracked products).
             tracked = self.tracked_products()
             ids = set(tracked["asin"]) | set(tracked["parent_asin"].dropna())
-            mine = reviews[reviews["asin"].isin(ids) | reviews["parent_asin"].isin(ids)]
-            reviews = mine if len(mine) >= sample else reviews
+            mine = reviews[(reviews["asin"].isin(ids) | reviews["parent_asin"].isin(ids))
+                           & _in_stars(reviews, self.study.stars)]
+            reviews = mine if len(mine) >= sample else reviews[_in_stars(reviews, self.study.stars)]
         scores = score_reviews(self.study, self.dir, reviews, name, sample=sample)
         self.note("score", scorer=name, scored=len(scores), reviews=len(reviews))
         return scores
@@ -428,6 +429,7 @@ class Run:
     # Step 5 ---------------------------------------------------------------
     def aggregate(self, cal: FiscalCalendar | None = None, write: bool = True) -> pd.DataFrame:
         reviews = rv.load(self.dir / "reviews.csv")
+        reviews = reviews[_in_stars(reviews, self.study.stars)]
         scope = self.study.aggregation.get("product_scope", "tracked")
         tracked = self.tracked_products()
         if scope == "tracked" and len(tracked):
@@ -560,31 +562,39 @@ def history_rates(mine: pd.DataFrame) -> dict[int, float]:
     return {s: float((window & (stars == s)).sum()) / 365 for s in range(1, 6)}
 
 
-def first_fetch_sizes(mine: pd.DataFrame, as_of: date, quarter_start: date,
-                      cap: int) -> tuple[int | dict[int, int], bool]:
-    """Per-star sizes for a product's first live fetch, and whether it bridges to the history.
+def first_fetch_plan(mine: pd.DataFrame, as_of: date, cal: FiscalCalendar, cap: int,
+                     stars: tuple[int, ...] = (1, 2, 3, 4, 5)) -> tuple[dict[int, int], str, str]:
+    """Per-star sizes for a product's first live fetch onto its stored history.
 
-    The scraper returns only the newest `cap` reviews per star. Rates come from
-    the product's last year of stored (historical) reviews:
-    - if every star's expected reviews since the history ends are under 70% of the
-      cap, ask for enough to reach back to it (1.5x expected + 5, at most the cap);
-    - otherwise a gap is unavoidable (the product rejoins the tone measure after
-      five complete quarters, see aggregate), so only the current quarter is
-      collected: enough to reach back to its start, which makes it complete.
-    A product with no stored reviews gets the full cap.
+    The scraper returns only the newest `cap` reviews per star. From the product's
+    historical review rates, reach back as far as is still affordable, i.e. where
+    every requested star's expected count is under 70% of the cap (headroom):
+    - "history": back to the end of the stored history: no gap at all;
+    - "five_quarters": back to the start of the quarter five before the current one:
+      enough for a call on the last completed quarter (it plus its four-quarter
+      baseline), so the product counts from the first fetch;
+    - "quarter": only the current quarter; the product joins calls once five
+      complete quarters have been collected.
+    Requests are 1.5x the expected count + 5, at most the cap.
+    Returns (sizes, back_to date, reach).
     """
-    if mine.empty:
-        return cap, False
     rate = history_rates(mine)
     newest = pd.to_datetime(mine["review_date"]).max()
+    this_q = cal.quarter(as_of)
+    reaches = (("history", newest.strftime("%Y-%m-%d")),
+               ("five_quarters", this_q.shift(-5).start.isoformat()),
+               ("quarter", this_q.start.isoformat()))
+    for reach, back_to in reaches:
+        days = max(1, (pd.Timestamp(as_of) - pd.Timestamp(back_to)).days + 2)
+        if reach == "quarter" or all(rate[s] * days < 0.7 * cap for s in stars):
+            return ({s: int(min(cap, max(5, math.ceil(rate[s] * days * 1.5) + 5))) for s in stars},
+                    back_to, reach)
+    raise AssertionError("unreachable")
 
-    def sizes(days: int) -> dict[int, int]:
-        return {s: int(min(cap, max(5, math.ceil(rate[s] * days * 1.5) + 5))) for s in range(1, 6)}
 
-    days = max(1, (pd.Timestamp(as_of) - newest).days + 2)
-    if all(rate[s] * days < 0.7 * cap for s in range(1, 6)):  # expected count fits, with headroom
-        return sizes(days), True
-    return sizes(max(1, (pd.Timestamp(as_of) - pd.Timestamp(quarter_start)).days + 2)), False
+def _in_stars(reviews: pd.DataFrame, stars: tuple[int, ...]) -> pd.Series:
+    """Reviews whose star rating is in the measured set."""
+    return pd.to_numeric(reviews["rating"], errors="coerce").round().isin(stars)
 
 
 def _mark_live(products: pd.DataFrame, asin: str, live: bool) -> None:

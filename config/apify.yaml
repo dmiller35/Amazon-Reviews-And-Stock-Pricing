@@ -45,3 +45,8 @@ check_asin: B07SGPJBZ6   # YETI Rambler 20 oz tumbler
 # Actor price per scraped review, used only for the cost estimates printed by
 # check-live (Apify charges your account's credit, console.apify.com/billing).
 price_per_review: 0.0018
+# Amazon shows the newest ~100 reviews per filter view. The actor accepts larger
+# requests but pads them with reviews from other views (not contiguous in time;
+# tested 2026-10-15: 111 returned for 150 asked, with a 405-day hole after the
+# first ~100), which would make a cut-off list look complete. Never ask for more.
+max_per_request: 100

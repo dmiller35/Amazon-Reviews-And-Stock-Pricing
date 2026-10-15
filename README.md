@@ -51,6 +51,7 @@ anticipate a company's revenue and its stock's reaction to earnings. It implemen
 | Only **negative** swings produce calls (`call_positive_swings: false`) | Tables 9–11: positive swings predicted nothing. |
 | Revenue "as first reported", Q4 derived from the 10-K | No look-ahead from restatements. |
 | No I/B/E/S consensus, so no earnings-surprise regression | Not freely available. The announcement return captures the market's surprise instead. |
+| Tone measured on **1-4 star reviews** (`aggregation.stars`; set `[1, 2, 3, 4, 5]` for the paper's all reviews) | Amazon shows only the newest ~100 reviews per star; busy products' five-star lists can't reach back the 15 months a live call needs, their 1-4 star lists can. Calls work from the first live fetch, and scraping costs roughly half. |
 | Tone compared on **matched products** across a quarter and its baseline | Live scraping can't reach back to 2023 for busy products; comparing only products with complete reviews in both keeps a missing product from looking like a tone change. With complete history (the backtest) every tracked product is used, as in the paper. |
 | Per-company pre-registration lock | Companies can be added at any time, but once a company has results it can't be edited or dropped, and the rules can't change. That enforces "never select companies after results". |
 
@@ -156,25 +157,34 @@ How it is used:
 **What live data costs and when it pays off.** Run `reviewtone estimate --all`
 after `check-live`: it reads your own data and prints, per company, the first
 live fetch, the monthly cost with weekly or 4-weekly updates, and the first
-quarter a live call is possible. For the five test companies it estimated $4.90
-for the first fetch, then about $7.40 a month with weekly updates or $3.40 every
-4 weeks. Updating every 4 weeks catches the same reviews, because request sizes
-follow the time since the last fetch, and it pays the per-product minimum less
-often. Products with more than about 3 reviews a day at one star level should
-stay weekly.
+quarter a live call is possible. For the five test companies (default 1-4 stars)
+it estimated $9.09 for the first fetch, then about $5.00 a month with weekly
+updates or $2.00 every 4 weeks, and a live call right after the first fetch for
+all five. Updating every 4 weeks catches the same reviews for most products,
+because request sizes follow the time since the last fetch; `estimate` flags
+products too busy for it.
 
-**Why live calls take about five quarters.** The scraper only returns each
-product's newest ~100 reviews per star, and the free history ends in September
-2023. A product busy enough to matter can't be bridged across that gap: its 100
-newest five-star reviews may span only a few months. Such a product rejoins the
-tone measure once five complete quarters (a signal quarter and its four-quarter
-baseline) have been collected. Tone is compared on **matched products**: each
-quarter is compared with its baseline using only products with complete reviews
-in all five quarters, so a missing product never looks like a change in tone.
-Quiet products that can be bridged are fetched back to 2023 (top-ups chase the
-gap only when that can close it), but they rarely have enough reviews for a call on
-their own. Expect the first live calls about five quarters after you start
-collecting. Until then, the historical backtest and the portfolio are the results.
+**Why tone is measured on 1-4 star reviews (`aggregation.stars`).** The scraper
+can only see each product's newest ~100 reviews per star rating (tested: asking
+for more returns a padded, non-contiguous list, so requests are capped at 100).
+A call needs the signal quarter and the four quarters before it, about 15 months.
+Busy products get several five-star reviews a day, so their five-star list
+covers only weeks or months, while their 1-4 star lists usually reach back years.
+Measured on 1-4 star reviews, nearly every tracked product is complete for the
+last 15 months from the first fetch, so calls work now instead of after five
+quarters of collecting. Complaints, which drive the negative swings that predict
+revenue in the paper, are in 1-4 stars; on the 2018-2023 data of the five test
+companies the 1-4 star AbnormalTone correlated 0.49-0.91 with the all-star one.
+The trade-off is that a shift between 4- and 5-star reviews is not seen. To
+measure every star as the paper does, set `stars: [1, 2, 3, 4, 5]` before the
+first run; busy products then join calls after about five quarters of updates.
+
+**First fetch.** For each product it reaches as far back as is affordable: to
+the end of the 2023 history if every star's list can get there, otherwise back
+five quarters (enough for a call on the last completed quarter), otherwise only
+the current quarter. Tone is compared on **matched products**: each quarter is
+compared with its baseline using only products with complete reviews in all five
+quarters, so a product without enough history never looks like a change in tone.
 
 How gaps are recorded: when a fetch is cut off before it reaches the reviews
 already stored, the window in between is recorded in `coverage.csv`, and a

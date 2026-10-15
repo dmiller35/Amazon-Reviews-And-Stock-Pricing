@@ -138,6 +138,7 @@ class Profile:
     payloads: Callable[[str, int, str | None], list[dict[str, Any]]]
     cap: Callable[[int], int]
     by_star: bool
+    star_numbers: tuple[int, ...] = (1, 2, 3, 4, 5)  # star of each payload, when split by star
 
 
 def _pages(m: int) -> int:
@@ -203,7 +204,9 @@ def template_profile(cfg: dict[str, Any]) -> Profile:
             return {k: int(fill(cap, {"max": min(v, limit)})) for k, v in m.items()}
         return int(fill(cap, {"max": min(m, limit)}))
 
-    return Profile(payloads, cap_for, by_star)
+    names = {v: k for k, v in STARS.items()}
+    numbers = tuple(names.get(str(v), i + 1) for i, v in enumerate(stars)) if split else (1, 2, 3, 4, 5)
+    return Profile(payloads, cap_for, by_star, numbers)
 
 
 def load_config(config: Path = CONFIG) -> dict[str, Any]:
@@ -231,9 +234,9 @@ class RunFailed(SourceUnavailable):
     the product is skipped this time, never retired for it."""
 
 
-# back_to value for a product with no stored reviews: fetch five-star first and
-# chase the other stars only back to where the five-star list ends.
-FIVE_STAR_CUTOFF = "five-star-cutoff"
+# back_to value for a product with no stored reviews: fetch the busiest requested
+# star (the highest) first and chase the others only back to where its list ends.
+BUSIEST_STAR_CUTOFF = "busiest-star-cutoff"
 
 
 @dataclass
@@ -319,25 +322,28 @@ class ApifyReviews:
 
     def fetch(self, asin: str, *, ticker: str, brand: str, max_reviews: int | dict[int, int] = 100,
               since: str | None = None, timeout_s: int = 900, back_to: str | None = None,
-              top_up: int | None = None) -> FetchResult:
+              top_up: int | None = None, stars: tuple[int, ...] | None = None) -> FetchResult:
         """Newest reviews of one product. max_reviews applies per star filter for star-filtered actors.
 
         back_to/top_up (star-split actors): if a star's list fills its request and still
         doesn't reach back to `back_to` (the newest review already stored), that star is
         asked again with `top_up` reviews, so a busier week than expected doesn't open a gap.
+        stars (star-split actors): fetch only these star ratings (default: all configured).
         """
         if not self.token:
             raise SourceUnavailable("APIFY_TOKEN is not set; cannot run the Apify review scraper.")
-        n_stars = len(STARS)
-        split = self.profile.by_star and len(self.profile.payloads(asin, 1, since)) == n_stars
+        numbers = self.profile.star_numbers
+        split = self.profile.by_star and len(numbers) > 1 and len(self.profile.payloads(asin, 1, since)) == len(numbers)
         if isinstance(max_reviews, dict) and not split:
             max_reviews = max(max_reviews.values())  # actor takes one size for all stars
         caps = self.profile.cap(max_reviews)
-        sizes = ({star: caps.get(star, max(caps.values())) for star in range(1, n_stars + 1)}
-                 if isinstance(caps, dict) else {star: caps for star in range(1, n_stars + 1)})
+        sizes = ({star: caps.get(star, max(caps.values())) for star in numbers}
+                 if isinstance(caps, dict) else {star: caps for star in numbers})
+        index = {star: i for i, star in enumerate(numbers)}
+        wanted = [st for st in numbers if stars is None or st in stars]
 
         def run_star(star: int, n: int) -> list[dict[str, Any]]:
-            return self.run(self.profile.payloads(asin, {**sizes, star: n}, since)[star - 1], asin=asin,
+            return self.run(self.profile.payloads(asin, {**sizes, star: n}, since)[index[star]], asin=asin,
                             timeout_s=timeout_s)
 
         def oldest(batch: list[dict[str, Any]]) -> str | None:
@@ -348,23 +354,23 @@ class ApifyReviews:
             batches = [self.run(payload, asin=asin, timeout_s=timeout_s)
                        for payload in self.profile.payloads(asin, max_reviews, since)]
         else:
-            batches: list[list[dict[str, Any]]] = [[] for _ in range(n_stars)]
-            order = list(range(1, n_stars + 1))
-            if back_to == FIVE_STAR_CUTOFF:
-                # No stored history: the busiest list (five-star) decides how far back the
+            by_star: dict[int, list[dict[str, Any]]] = {}
+            order = list(wanted)
+            if back_to == BUSIEST_STAR_CUTOFF:
+                # No stored history: the busiest list (highest star) decides how far back the
                 # product can be complete; older reviews of other stars could never be used.
-                batches[n_stars - 1] = run_star(n_stars, sizes[n_stars])
-                full = len(batches[n_stars - 1]) >= sizes[n_stars]
-                back_to = oldest(batches[n_stars - 1]) if full else None
+                busiest = order.pop()
+                by_star[busiest] = run_star(busiest, sizes[busiest])
+                full = len(by_star[busiest]) >= sizes[busiest]
+                back_to = oldest(by_star[busiest]) if full else None
                 if full and top_up:
-                    sizes = {**{st: min(sizes[st], 10) for st in range(1, n_stars)}, n_stars: sizes[n_stars]}
-                order = order[:-1]
+                    sizes = {st: (n if st == busiest else min(n, 10)) for st, n in sizes.items()}
             for star in order:
-                batches[star - 1] = run_star(star, sizes[star])
-            for star in range(1, n_stars + 1):
+                by_star[star] = run_star(star, sizes[star])
+            for star in wanted:
                 # Top up a list that filled before reaching back_to: first to 4x, then to the cap.
-                while back_to and top_up and len(batches[star - 1]) >= sizes[star] and sizes[star] < top_up:
-                    first = oldest(batches[star - 1])
+                while back_to and top_up and len(by_star[star]) >= sizes[star] and sizes[star] < top_up:
+                    first = oldest(by_star[star])
                     if first is not None and first <= back_to:
                         break  # reached what is needed: complete
                     n = min(top_up, max(4 * sizes[star], sizes[star] + 10))
@@ -373,8 +379,9 @@ class ApifyReviews:
                     except RunFailed as e:  # keep the list already paid for; it is recorded as cut off
                         self.log.record(source="apify", kind="top_up_failed", asin=asin, star=star, error=str(e))
                         break
-                    batches[star - 1], sizes = batch, {**sizes, star: self.profile.cap({**sizes, star: n})[star]}
+                    by_star[star], sizes = batch, {**sizes, star: self.profile.cap({**sizes, star: n})[star]}
                     self.log.record(source="apify", kind="top_up", asin=asin, star=star, size=n)
+            batches = [by_star[st] for st in wanted]
         items = [x for batch in batches for x in batch]
         df, unmapped = normalize_items(items, ticker=ticker, brand=brand, fetched_at=utcnow())
         if len(df):
@@ -383,8 +390,8 @@ class ApifyReviews:
             # Truncation is judged on the raw count per star: reviews from other
             # marketplaces are dropped after, and must not make a cut list look complete.
             cut = []
-            for i, batch in enumerate(batches):
-                if batch and len(batch) >= sizes[i + 1]:
+            for star, batch in zip(wanted, batches):
+                if batch and len(batch) >= sizes[star]:
                     d, _ = normalize_items(batch, ticker=ticker, brand=brand, fetched_at="")
                     cut.append(d["review_date"].min() if len(d) else utcnow()[:10])
             hit_cap, complete_from = bool(cut), (max(cut) if cut else None)

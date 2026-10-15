@@ -60,6 +60,17 @@ aggregation:
   # same products. all: every catalogued product (the paper's approach; only
   # sound when every product is also scraped live).
   product_scope: tracked
+  # Star ratings whose reviews make up the tone measure, in every quarter
+  # (historical and live), and the only ones scraped live. Default 1-4: Amazon
+  # lists only the newest ~100 reviews per star, and busy products get several
+  # five-star reviews a day, so a five-star list can't reach back the 15 months
+  # a call needs (signal quarter + 4-quarter baseline). Their 1-4 star lists
+  # usually can, so calls work from the first live fetch, and skipping five-star
+  # reviews roughly halves scraping cost. Complaints (the negative swings that
+  # predict revenue in Jin 2022) are in 1-4 stars. [1, 2, 3, 4, 5] measures all
+  # reviews as in the paper; then busy products only join after about five
+  # quarters of updates. Locked with the rules at the first run.
+  stars: [1, 2, 3, 4]
   # Quarters of history the prompt asks for before results are trusted.
   target_complete_quarters: 12
 
